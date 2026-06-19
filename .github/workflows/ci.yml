@@ -62,7 +62,8 @@ jobs:
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
       - name: Deny policy — licenses and advisories
-        run: cargo deny check advisories licenses sources || echo "cargo-deny: review warnings above"
+        run: |
+          cargo deny check advisories licenses sources || echo "cargo-deny warnings above (non-blocking)"
 
   coverage:
     name: structural coverage — cargo tarpaulin (REQ-DO-013)
