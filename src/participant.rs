@@ -107,6 +107,9 @@ impl SubInner {
 
     pub(crate) fn unsubscribe(&self) {
         self.unsubscribed.store(true, Ordering::SeqCst);
+        // §6.4: after unsubscribe the channel MUST be closed so recv() can drain
+        // and return None rather than blocking indefinitely.
+        self.close();
     }
 }
 

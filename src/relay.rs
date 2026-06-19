@@ -5,9 +5,9 @@
 
 //! RELAY protocol types bundled locally until a relay-rs crate is published.
 //!
-//! These types mirror the RELAY spec v1.7 definitions for Rust (§18.3).
+//! These types mirror the RELAY spec v1.10 definitions for Rust (§18.3).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -100,8 +100,9 @@ pub struct Message {
     pub timestamp: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub seq: u64,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub meta: HashMap<String, String>,
+    // §18.3 specifies BTreeMap for deterministic key ordering in byte-identical comparisons.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub meta: BTreeMap<String, String>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -117,7 +118,7 @@ impl Message {
             payload,
             timestamp: Utc::now(),
             seq: 0,
-            meta: HashMap::new(),
+            meta: BTreeMap::new(),
         }
     }
 }

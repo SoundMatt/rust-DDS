@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "1.10",
+  "kind": "provenance",
+  "tool": "rust-FuSa",
+  "toolVersion": "0.2.8",
+  "language": "rust",
+  "generatedAt": "2026-06-19T18:25:49.980519Z",
+  "format": "x-FuSa provenance v1",
+  "module": "rust-dds",
+  "builder": "local",
+  "vcsRevision": "a205a98",
+  "vcsModified": true,
+  "os": "macos",
+  "arch": "aarch64"
+}

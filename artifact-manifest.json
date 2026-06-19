@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.10",
+  "kind": "artifact-manifest",
+  "tool": "rust-FuSa",
+  "toolVersion": "0.2.8",
+  "language": "rust",
+  "generatedAt": "2026-06-19T18:25:49.980675Z",
+  "format": "x-FuSa manifest v1",
+  "artifacts": [
+    {
+      "path": "sbom.json",
+      "sha256": "c8971ceb42efa45411c57ff39a1053096ac6a7e1609c6833c390b9afdf84d562"
+    },
+    {
+      "path": "provenance.json",
+      "sha256": "95aa5e9ee418f2fcc559e82f0ab23a43331cde78c8d2e1527b3e7573246fefc7"
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "1.10",
+  "kind": "qualification",
+  "tool": "rust-FuSa",
+  "toolVersion": "0.2.8",
+  "language": "rust",
+  "generatedAt": "2026-06-19T18:26:06.938179Z",
+  "total": 16,
+  "passed": 16,
+  "failed": 0,
+  "results": [
+    {
+      "name": "FUSA001-neg: .fusa.json present",
+      "result": "PASS"
+    },
+    {
+      "name": "FUSA001-pos: missing .fusa.json",
+      "result": "PASS"
+    },
+    {
+      "name": "FUSA002-neg: Cargo.toml present",
+      "result": "PASS"
+    },
+    {
+      "name": "FUSA002-pos: missing Cargo.toml",
+      "result": "PASS"
+    },
+    {
+      "name": "FUSA003-neg: LICENSE present",
+      "result": "PASS"
+    },
+    {
+      "name": "FUSA003-pos: missing LICENSE",
+      "result": "PASS"
+    },
+    {
+      "name": "FUSA004-neg: README.md present",
+      "result": "PASS"
+    },
+    {
+      "name": "FUSA004-pos: missing README",
+      "result": "PASS"
+    },
+    {
+      "name": "FUSA005-neg: .github/workflows present",
+      "result": "PASS"
+    },
+    {
+      "name": "FUSA005-pos: missing CI config",
+      "result": "PASS"
+    },
+    {
+      "name": "LINT001-neg: unsafe block with justification",
+      "result": "PASS"
+    },
+    {
+      "name": "LINT001-pos: unsafe block without justification",
+      "result": "PASS"
+    },
+    {
+      "name": "LINT002-neg: no .unwrap() in source",
+      "result": "PASS"
+    },
+    {
+      "name": "LINT002-pos: .unwrap() in source",
+      "result": "PASS"
+    },
+    {
+      "name": "LINT004-neg: transmute with justification",
+      "result": "PASS"
+    },
+    {
+      "name": "LINT004-pos: transmute without justification",
+      "result": "PASS"
+    }
+  ],
+  "hash": "sha256:b68b12d0479bdc2a89b0d5784b75655c339c2aabe1765f68376e71503876939e"
+}

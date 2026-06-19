@@ -215,7 +215,7 @@ impl MockParticipant {
     pub fn new(domain: Domain) -> Result<Arc<Self>, Error> {
         validate_domain(domain)?;
         let mut prefix = [0u8; 12];
-        prefix[0] = domain.0 as u8;
+        prefix[0] = domain.0 as u8; // safe: domain validated to [0,232] before this line
         Ok(Arc::new(Self {
             domain,
             broker: Broker::new(),
@@ -521,6 +521,28 @@ mod tests {
         let pub_ = p.new_publisher("t/u", QoS::default()).await.unwrap();
         pub_.write(b"after-unsub".to_vec()).await.unwrap();
         assert!(rx.try_recv().is_none());
+    }
+
+    //fusa:test REQ-SUB-004
+    //fusa:test REQ-IEC-005
+    #[tokio::test]
+    async fn unsubscribe_closes_channel_so_recv_returns_none() {
+        // §6.4: recv() MUST return None after unsubscribe, not block forever.
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let (rx, sub) = p
+            .new_subscriber("t/unsub-recv", QoS::default())
+            .await
+            .unwrap();
+        sub.unsubscribe();
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
+        assert!(
+            result.is_ok(),
+            "recv() blocked after unsubscribe — §6.4 violation"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "recv() should return None after unsubscribe"
+        );
     }
 
     //fusa:test REQ-SUB-005

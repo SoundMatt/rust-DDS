@@ -1,0 +1,110 @@
+{
+  "schemaVersion": "1.10",
+  "kind": "hara",
+  "tool": "rust-FuSa",
+  "toolVersion": "0.2.8",
+  "language": "rust",
+  "generatedAt": "2026-06-19T18:26:09.639639+00:00",
+  "hazards": [
+    {
+      "hazardId": "HAZ-001",
+      "description": "Late or missing sample delivery under back-pressure",
+      "situation": "High-rate publisher overwhelms a slow subscriber; back-pressure policy drops samples before they are consumed",
+      "severity": "S2",
+      "exposure": "E4",
+      "controllability": "C2",
+      "asil": "ASIL-B",
+      "mitigation": "BackPressurePolicy enforced per REQ-ASIL-008; DropNewest/DropOldest/Block configurable per QoS; drop visibility tracked per REQ-IEC-007"
+    },
+    {
+      "hazardId": "HAZ-002",
+      "description": "Corrupt or truncated payload delivered to subscriber",
+      "situation": "Internal serialisation fault or memory corruption produces a malformed payload reaching the application",
+      "severity": "S3",
+      "exposure": "E3",
+      "controllability": "C2",
+      "asil": "ASIL-C",
+      "mitigation": "All payloads are opaque Vec<u8>; transport is in-process (MockParticipant) with no serialisation step; future RTPS transport must add CRC or TLS"
+    },
+    {
+      "hazardId": "HAZ-003",
+      "description": "Sample delivered to wrong subscriber (topic isolation failure)",
+      "situation": "Broker routing table corrupted or topic string comparison fails; sample from topic A reaches subscriber on topic B",
+      "severity": "S3",
+      "exposure": "E2",
+      "controllability": "C2",
+      "asil": "ASIL-B",
+      "mitigation": "Broker uses exact HashMap key match on topic string per REQ-IEC-006; Mutex prevents concurrent map mutation; tested by multi-topic isolation tests per REQ-DO-008"
+    },
+    {
+      "hazardId": "HAZ-004",
+      "description": "Cross-domain message leakage",
+      "situation": "Participant created on domain D1 receives messages published on domain D2 due to missing domain isolation",
+      "severity": "S2",
+      "exposure": "E3",
+      "controllability": "C3",
+      "asil": "ASIL-B",
+      "mitigation": "Each MockParticipant holds its own Broker instance; no shared broker across domains per REQ-PART-001; domain validated [0,232] per REQ-ASIL-006"
+    },
+    {
+      "hazardId": "HAZ-005",
+      "description": "Subscriber blocked indefinitely after unsubscribe",
+      "situation": "Application calls unsubscribe() then awaits recv(); recv() never returns None if channel is not closed",
+      "severity": "S2",
+      "exposure": "E4",
+      "controllability": "C2",
+      "asil": "ASIL-B",
+      "mitigation": "unsubscribe() calls close() on SubInner per §6.4 fix; recv() drains and returns None; regression test unsubscribe_closes_channel_so_recv_returns_none"
+    },
+    {
+      "hazardId": "HAZ-006",
+      "description": "Sequence number wraparound produces false ordering",
+      "situation": "u64 sequence counter wraps around to 0 after 2^64 writes; application interprets wrap as a very old sample",
+      "severity": "S1",
+      "exposure": "E1",
+      "controllability": "C3",
+      "asil": "QM",
+      "mitigation": "u64 provides ~1.8×10^19 writes before wrap; at 1M writes/s this is >580,000 years; documented per REQ-ASIL-005"
+    },
+    {
+      "hazardId": "HAZ-007",
+      "description": "Write after close returns success instead of error",
+      "situation": "Publisher or Participant is closed; subsequent write() call proceeds and delivers data to subscribers still open on the topic",
+      "severity": "S2",
+      "exposure": "E3",
+      "controllability": "C2",
+      "asil": "ASIL-B",
+      "mitigation": "AtomicBool closed flag checked at entry of every write() and send(); returns Error::Closed per REQ-ASIL-007 and §6.1–6.2"
+    },
+    {
+      "hazardId": "HAZ-008",
+      "description": "GUID collision causes wrong writer attribution on received samples",
+      "situation": "Two publishers on the same participant receive the same GUID prefix + counter; downstream code uses writer_guid for security decisions",
+      "severity": "S2",
+      "exposure": "E2",
+      "controllability": "C2",
+      "asil": "ASIL-B",
+      "mitigation": "GUID prefix encodes domain in byte 0, AtomicU64 pub_counter (fetch_add) in bytes 8-15; no two publishers on the same participant share a GUID per REQ-SEC-007"
+    },
+    {
+      "hazardId": "HAZ-009",
+      "description": "Empty or malicious topic name causes undefined routing",
+      "situation": "Caller passes an empty string or path-traversal string as topic; broker creates an entry that can never be matched or masks an existing topic",
+      "severity": "S2",
+      "exposure": "E3",
+      "controllability": "C1",
+      "asil": "ASIL-A",
+      "mitigation": "Topic emptiness validated at new_publisher/new_subscriber entry; returns Error::TopicEmpty per REQ-SEC-001 and REQ-SEC-013"
+    },
+    {
+      "hazardId": "HAZ-010",
+      "description": "Payload exceeds safe size bound causing memory exhaustion",
+      "situation": "Caller writes an unbounded payload; allocation fails or OOM kills the process in a safety-critical embedded context",
+      "severity": "S3",
+      "exposure": "E3",
+      "controllability": "C2",
+      "asil": "ASIL-C",
+      "mitigation": "MockParticipant imposes no payload size limit (future RTPS transport must gate on REQ-SEC-002 PayloadTooLarge); current ASIL-C risk accepted for mock-only transport milestone"
+    }
+  ]
+}
