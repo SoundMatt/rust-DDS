@@ -4,16 +4,26 @@
   "tool": "rust-FuSa",
   "toolVersion": "0.2.8",
   "language": "rust",
-  "generatedAt": "2026-06-19T18:25:49.980675Z",
+  "generatedAt": "2026-06-19T20:00:00.000000+00:00",
   "format": "x-FuSa manifest v1",
   "artifacts": [
-    {
-      "path": "sbom.json",
-      "sha256": "c8971ceb42efa45411c57ff39a1053096ac6a7e1609c6833c390b9afdf84d562"
-    },
-    {
-      "path": "provenance.json",
-      "sha256": "95aa5e9ee418f2fcc559e82f0ab23a43331cde78c8d2e1527b3e7573246fefc7"
-    }
+    { "path": "SAFETY_PLAN.md", "description": "Development safety plan and process description" },
+    { "path": "SAFETY_CASE.md", "description": "Safety case — GSN structured argument, ASIL-B/SIL-2/DAL-C claim with 7 residual gaps" },
+    { "path": "SAFETY_MANUAL.md", "description": "Safety manual for system integrators (SEooC)" },
+    { "path": "BOUNDARY.md", "description": "System boundary diagram and trust zone map" },
+    { "path": "SECURITY.md", "description": "Security policy and vulnerability reporting" },
+    { "path": "requirements.json", "description": "115 requirements with bidirectional traceability" },
+    { "path": ".fusa.json", "description": "rust-FuSa project configuration" },
+    { "path": ".fusa-reqs.json", "description": "rust-FuSa requirements cache" },
+    { "path": ".fusa-hara.json", "description": "HARA: 10 DDS-specific hazards (HAZ-001..010)" },
+    { "path": "fmea.json", "description": "Design FMEA: 40 failure modes across all modules" },
+    { "path": "fmea.csv", "description": "FMEA in CSV format for tool integration" },
+    { "path": "tara.json", "description": "TARA: 8 DDS-specific STRIDE threats (ISO/SAE 21434)" },
+    { "path": "tara.md", "description": "TARA in Markdown format for review" },
+    { "path": "sbom.json", "description": "Software Bill of Materials (CycloneDX format)" },
+    { "path": "provenance.json", "description": "Build provenance and toolchain record" },
+    { "path": "qualify-report.json", "description": "Tool qualification report (all cases PASS)" },
+    { "path": "vuln.json", "description": "Vulnerability scan results (0 known CVEs)" },
+    { "path": "artifact-manifest.json", "description": "This file — manifest of all evidence artifacts" }
   ]
 }

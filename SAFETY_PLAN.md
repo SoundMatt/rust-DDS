@@ -17,16 +17,20 @@ out of Context) integrated into a safety-relevant system.
 ## Safety Requirements
 
 All functional safety requirements are recorded in `requirements.json` with the
-following categories and IDs:
+following categories and IDs (115 total):
 
 | Category | IDs | Standard |
 |----------|-----|----------|
 | ASIL requirements | REQ-ASIL-001 – REQ-ASIL-010 | ISO 26262 |
-| IEC requirements | REQ-IEC-001 – REQ-IEC-010 | IEC 61508 |
-| DO-178C requirements | REQ-DO-001 – REQ-DO-008 | DO-178C |
-| Cybersecurity | REQ-SEC-001 – REQ-SEC-015 | |
+| HAZ-derived safety goals | REQ-HAZ-001, 002, 003, 004, 005, 007 | ISO 26262 (HARA-derived) |
+| IEC requirements | REQ-IEC-001 – REQ-IEC-015 | IEC 61508 SIL-3 |
+| DO-178C requirements | REQ-DO-001 – REQ-DO-014 | DO-178C DAL-A |
+| Cybersecurity | REQ-SEC-001 – REQ-SEC-015 | ISO/SAE 21434 CAL-3 |
 | Memory safety | REQ-MEM-001 – REQ-MEM-006 | |
 | Real-time | REQ-RT-001 – REQ-RT-005 | |
+| Integrity | REQ-INT-001 – REQ-INT-003 | |
+| Concurrency | REQ-CONC-001 – REQ-CONC-004 | |
+| Configuration management | REQ-CM-001 – REQ-CM-003 | |
 
 ## Traceability
 
@@ -105,16 +109,32 @@ hardcoded expected hex bytes for the writer_guid.
 `multiple_subscribers_receive_same_sample` verifies broadcast delivery to concurrent
 subscribers.
 
+## Safety Documentation
+
+| Document | Description |
+|----------|-------------|
+| `SAFETY_PLAN.md` | This file — development safety plan and process |
+| `SAFETY_MANUAL.md` | Integrator-facing safety manual (SEooC, AoU, interface catalog) |
+| `BOUNDARY.md` | System boundary diagram, trust zones, data flows, partitioning |
+| `SECURITY.md` | Security policy and vulnerability reporting |
+
 ## CI Quality Gates
 
 | Job | Purpose |
 |-----|---------|
-| `test` | Multi-platform × multi-toolchain test suite |
+| `test` | Multi-platform × multi-toolchain test suite (6× matrix) |
 | `release-build` | Catch release-mode issues (optimizer, overflow) |
 | `lint` | `cargo fmt`, `cargo clippy -D warnings`, dead code |
-| `security-audit` | `cargo audit` — blocks on RUSTSEC advisories |
-| `fusa-trace` | Bidirectional traceability gate (all reqs → code → tests) |
-| `safety-artifacts` | Verifies SECURITY.md, SAFETY_PLAN.md, requirements.json exist |
+| `security-audit` | `cargo audit` + `cargo deny` — blocks on RUSTSEC advisories |
+| `coverage` | `cargo tarpaulin` structural coverage report (REQ-DO-013) |
+| `relay-conform` | `relay conform --strict` §12.1/12.2/12.3 schema gates |
+| `relay-interop` | `relay interop` behavioural conformance gate |
+| `rsfusa-check` | `rsfusa check` — 0 ERROR findings required |
+| `rsfusa-qualify` | `rsfusa qualify` — 16/16 qualification cases PASS |
+| `rsfusa-vuln` | `rsfusa vuln` — vulnerability scan |
+| `rsfusa-cyber` | `rsfusa cyber` — cybersecurity analysis |
+| `fusa-trace` | Bidirectional traceability gate (all 115 reqs → code → tests) |
+| `safety-artifacts` | Verifies 17 evidence files present + valid JSON + content checks |
 | `dco` | Developer Certificate of Origin on all commits |
 
 ## Known Limitations (v0.1)

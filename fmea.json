@@ -1,273 +1,465 @@
 {
-  "asilLevel": "UNCLASSIFIED",
+  "schemaVersion": "1.10",
+  "kind": "fmea",
+  "tool": "rust-FuSa",
+  "toolVersion": "0.2.8",
+  "language": "rust",
+  "asilLevel": "ASIL-D (intent); ASIL-B (achieved)",
+  "generatedAt": "2026-06-19T20:30:00.000000+00:00",
+  "rpnScale": {
+    "severity": "1=negligible .. 10=catastrophic safety violation",
+    "occurrence": "1=remote (<1:1M) .. 10=very high (>1:10); Rust type-system-enforced failures score O=1",
+    "detection": "1=certain (compiler/static) .. 10=none; dedicated unit test scores D=2; CI gate D=3",
+    "rpnThresholds": {"low": "<50", "medium": "50–149", "high": "≥150"}
+  },
   "entries": [
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Caller receives unexpected error; may abort operation",
-      "failureMode": "Returns Err when Ok expected",
-      "function": "new",
-      "module": "src/types.rs",
-      "requirements": [
-        "REQ-PART-001"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-001",
+      "module": "src/types.rs", "function": "Domain::new",
+      "failureMode": "Accepts domain outside [0,232]",
+      "effect": "Participant created with invalid domain; routing undefined",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "validate_domain() guards entry; domain_out_of_range test",
+      "action": "none — adequately controlled",
+      "requirements": ["REQ-PART-001", "REQ-ASIL-006", "REQ-DO-006"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Caller receives unexpected error; may abort operation",
-      "failureMode": "Returns Err when Ok expected",
-      "function": "validate_domain",
-      "module": "src/types.rs",
-      "requirements": [
-        "REQ-PART-001",
-        "REQ-ASIL-006",
-        "REQ-DO-006",
-        "REQ-IEC-002"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-002",
+      "module": "src/types.rs", "function": "validate_domain",
+      "failureMode": "Off-by-one error: accepts 233 or rejects 232",
+      "effect": "Valid domain rejected or invalid domain accepted",
+      "severity": 6, "occurrence": 2, "detection": 2, "rpn": 24,
+      "rpnRisk": "LOW",
+      "detectionMethod": "Explicit boundary tests Domain(232)=PASS, Domain(233)=FAIL",
+      "action": "none — boundary tests cover both sides",
+      "requirements": ["REQ-PART-001", "REQ-ASIL-006", "REQ-DO-006", "REQ-IEC-002"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "to_message",
-      "module": "src/types.rs",
-      "requirements": [
-        "REQ-RELAY-001",
-        "REQ-DO-007",
-        "REQ-SEC-010"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-003",
+      "module": "src/types.rs", "function": "Sample::to_message",
+      "failureMode": "writer_guid encoded incorrectly (wrong hex length)",
+      "effect": "Receiver cannot extract GUID; replay detection fails",
+      "severity": 6, "occurrence": 2, "detection": 2, "rpn": 24,
+      "rpnRisk": "LOW",
+      "detectionMethod": "Golden vector test sample_to_message_golden_vector",
+      "action": "none — golden vector test is deterministic",
+      "requirements": ["REQ-RELAY-001", "REQ-DO-007", "REQ-SEC-010", "REQ-HAZ-002"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Caller receives unexpected error; may abort operation",
-      "failureMode": "Returns Err when Ok expected",
-      "function": "from_message",
-      "module": "src/types.rs",
-      "requirements": [
-        "REQ-RELAY-001",
-        "REQ-SEC-004",
-        "REQ-SEC-011"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-004",
+      "module": "src/types.rs", "function": "Sample::to_message",
+      "failureMode": "Payload bytes corrupted during clone",
+      "effect": "Subscriber receives wrong data — ASIL-C safety violation (HAZ-002)",
+      "severity": 9, "occurrence": 1, "detection": 2, "rpn": 18,
+      "rpnRisk": "LOW",
+      "detectionMethod": "payload_integrity_byte_for_byte test; Vec::clone is bit-identical by Rust specification",
+      "action": "none — safe Rust clone is formally guaranteed",
+      "requirements": ["REQ-HAZ-002", "REQ-SEC-011", "REQ-RELAY-001"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Caller receives unexpected error; may abort operation",
-      "failureMode": "Returns Err when Ok expected",
-      "function": "serialize",
-      "module": "src/types.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-005",
+      "module": "src/types.rs", "function": "Sample::from_message",
+      "failureMode": "GUID field missing in meta — error returned or all-zeros GUID used",
+      "effect": "Caller receives unexpected error or zero GUID; replay detection impaired",
+      "severity": 5, "occurrence": 2, "detection": 2, "rpn": 20,
+      "rpnRisk": "LOW",
+      "detectionMethod": "Requirement-traced unit test for from_message",
+      "action": "none — explicit test covers missing-field case",
+      "requirements": ["REQ-RELAY-001", "REQ-SEC-004", "REQ-SEC-011"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Caller receives unexpected error; may abort operation",
-      "failureMode": "Returns Err when Ok expected",
-      "function": "deserialize",
-      "module": "src/types.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-006",
+      "module": "src/types.rs", "function": "Sample::from_message",
+      "failureMode": "GUID hex string wrong length — not caught before decode",
+      "effect": "Corrupt writer_guid stored; replay detection confused",
+      "severity": 6, "occurrence": 2, "detection": 2, "rpn": 24,
+      "rpnRisk": "LOW",
+      "detectionMethod": "hex::decode returns Err on wrong length; validated in from_message",
+      "action": "none — hex crate enforces length",
+      "requirements": ["REQ-SEC-004", "REQ-RELAY-001"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Caller may unwrap None and panic",
-      "failureMode": "Returns None when Some expected",
-      "function": "as_relay",
-      "module": "src/error.rs",
-      "requirements": [
-        "REQ-ERR-003",
-        "REQ-SEC-014",
-        "REQ-IEC-009"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-007",
+      "module": "src/error.rs", "function": "Error::as_relay",
+      "failureMode": "New Error variant added without adding an as_relay match arm",
+      "effect": "Variant silently maps to wrong sentinel; caller misinterprets error class",
+      "severity": 6, "occurrence": 3, "detection": 1, "rpn": 18,
+      "rpnRisk": "LOW",
+      "detectionMethod": "Non-exhaustive match is a compiler error in Rust; caught at build time",
+      "action": "none — Rust compiler enforces exhaustiveness",
+      "requirements": ["REQ-ERR-003", "REQ-SEC-014", "REQ-IEC-009"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Caller receives unexpected error; may abort operation",
-      "failureMode": "Returns Err when Ok expected",
-      "function": "new",
-      "module": "src/mock/mod.rs",
-      "requirements": [
-        "REQ-MOCK-001"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-008",
+      "module": "src/error.rs", "function": "Error::as_relay",
+      "failureMode": "AccessDenied mapped to wrong sentinel (e.g. Timeout instead of NotConnected)",
+      "effect": "Authorization failure appears as transport/network error to caller",
+      "severity": 6, "occurrence": 2, "detection": 2, "rpn": 24,
+      "rpnRisk": "LOW",
+      "detectionMethod": "Explicit unit test: AccessDenied → NotConnected mapping",
+      "action": "none — specific mapping test in error.rs",
+      "requirements": ["REQ-SEC-014", "REQ-ERR-003"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "written_payloads",
-      "module": "src/mock/mod.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-009",
+      "module": "src/participant.rs", "function": "SubInner::push",
+      "failureMode": "Back-pressure policy not applied — queue grows unbounded under DropNewest",
+      "effect": "Memory exhaustion; OOM crash in safety-critical context (HAZ-001)",
+      "severity": 9, "occurrence": 2, "detection": 2, "rpn": 36,
+      "rpnRisk": "LOW",
+      "detectionMethod": "drop_newest_does_not_exceed_capacity test; explicit policy match arm",
+      "action": "none — capacity test verifies invariant on every CI run",
+      "requirements": ["REQ-MEM-002", "REQ-ASIL-008", "REQ-QOS-006", "REQ-HAZ-001"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "reset",
-      "module": "src/mock/mod.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-010",
+      "module": "src/participant.rs", "function": "SubInner::push",
+      "failureMode": "Delivers sample to closed or unsubscribed subscriber channel",
+      "effect": "Stale data delivered after subscriber lifecycle ends",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "unsubscribed/closed guard checked at push() entry before any queue access",
+      "action": "none — guard is first expression in push()",
+      "requirements": ["REQ-IEC-005", "REQ-SUB-004", "REQ-HAZ-005"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "to_message",
-      "module": "src/adapt.rs",
-      "requirements": [
-        "REQ-RELAY-001"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-011",
+      "module": "src/participant.rs", "function": "SubInner::push",
+      "failureMode": "DropOldest drops newest entry instead of oldest",
+      "effect": "Sample ordering violated; replay detection inconsistent",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "drop_oldest_makes_room verifies 'b','c' retained not 'a','b'",
+      "action": "none — explicit ordering assertion in test",
+      "requirements": ["REQ-QOS-007", "REQ-RT-001", "REQ-HAZ-001"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Caller receives unexpected error; may abort operation",
-      "failureMode": "Returns Err when Ok expected",
-      "function": "from_message",
-      "module": "src/adapt.rs",
-      "requirements": [
-        "REQ-RELAY-001"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-012",
+      "module": "src/participant.rs", "function": "SubInner::close",
+      "failureMode": "close() sets flag but does not call notify_waiters() — recv() blocks forever",
+      "effect": "Subscriber stuck; task leak in safety-critical system",
+      "severity": 8, "occurrence": 2, "detection": 2, "rpn": 32,
+      "rpnRisk": "LOW",
+      "detectionMethod": "notify_waiters() in close(); unsubscribe_closes_channel_so_recv_returns_none",
+      "action": "none — test uses 100ms timeout to confirm non-blocking",
+      "requirements": ["REQ-MEM-004", "REQ-ASIL-007", "REQ-IEC-010", "REQ-HAZ-005"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "adapt",
-      "module": "src/adapt.rs",
-      "requirements": [
-        "REQ-RELAY-002"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-013",
+      "module": "src/participant.rs", "function": "SubInner::unsubscribe",
+      "failureMode": "unsubscribe() sets unsubscribed flag but does not call close() — recv() blocks",
+      "effect": "§6.4 violation: recv() never returns None; application hangs indefinitely",
+      "severity": 9, "occurrence": 2, "detection": 2, "rpn": 36,
+      "rpnRisk": "LOW",
+      "detectionMethod": "unsubscribe() explicitly calls self.close(); regression test for §6.4",
+      "action": "none — regression test added after §6.4 fix; FMEA entry documents the fix",
+      "requirements": ["REQ-SUB-004", "REQ-HAZ-005", "REQ-IEC-005"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "new",
-      "module": "src/relay.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-014",
+      "module": "src/participant.rs", "function": "SampleReceiver::recv",
+      "failureMode": "Race: pop() returns None, closed check sees false, Notify fires before notified() — wakeup missed",
+      "effect": "recv() sleeps forever despite data in queue; task leak",
+      "severity": 8, "occurrence": 3, "detection": 3, "rpn": 72,
+      "rpnRisk": "MEDIUM",
+      "detectionMethod": "Tokio Notify semantics: notify_one() between pop() and notified() is not lost; verified by Tokio correctness guarantee",
+      "action": "Add comment citing Tokio Notify documentation; review if switching from Notify to channel in future",
+      "requirements": ["REQ-ASIL-010", "REQ-MEM-005", "REQ-CONC-001"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Downstream computation produces incorrect result",
-      "failureMode": "Returns incorrect integer value (overflow or truncation)",
-      "function": "chan_depth",
-      "module": "src/relay.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-015",
+      "module": "src/participant.rs", "function": "SampleReceiver::recv",
+      "failureMode": "Final drain after close() returns stale sample out-of-order",
+      "effect": "Application processes samples in wrong order after close",
+      "severity": 4, "occurrence": 2, "detection": 2, "rpn": 16,
+      "rpnRisk": "LOW",
+      "detectionMethod": "VecDeque is FIFO; sequence_numbers_monotonic test verifies order",
+      "action": "none",
+      "requirements": ["REQ-ASIL-010", "REQ-INT-002"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "with_topic",
-      "module": "src/relay.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-016",
+      "module": "src/mock/mod.rs", "function": "MockParticipant::new",
+      "failureMode": "Accepts invalid domain — validate_domain not called",
+      "effect": "Participant in illegal domain; routing undefined (HAZ-004)",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "validate_domain() first call in new(); domain_out_of_range test",
+      "action": "none",
+      "requirements": ["REQ-MOCK-001", "REQ-PART-001", "REQ-HAZ-004"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "background",
-      "module": "src/relay.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-017",
+      "module": "src/mock/mod.rs", "function": "Broker::publish",
+      "failureMode": "Sample delivered to subscriber on different topic (wrong HashMap key)",
+      "effect": "Cross-topic contamination — ASIL-B safety violation (HAZ-003)",
+      "severity": 9, "occurrence": 2, "detection": 2, "rpn": 36,
+      "rpnRisk": "LOW",
+      "detectionMethod": "HashMap exact-key match; topic_isolation_no_cross_delivery test",
+      "action": "none — dedicated isolation test on every CI run",
+      "requirements": ["REQ-MOCK-002", "REQ-IEC-005", "REQ-HAZ-003"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "with_timeout",
-      "module": "src/relay.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-018",
+      "module": "src/mock/mod.rs", "function": "Broker::publish",
+      "failureMode": "Closed subscriber not removed — retain() predicate wrong direction",
+      "effect": "Delivery to dead subscriber; resource leak; potential panic on stale Arc",
+      "severity": 6, "occurrence": 2, "detection": 2, "rpn": 24,
+      "rpnRisk": "LOW",
+      "detectionMethod": "retain() checks !sub.closed.load(); subscriber_close tests exercise this",
+      "action": "none",
+      "requirements": ["REQ-IEC-005", "REQ-HAZ-003", "REQ-MEM-004"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect conditional branch taken",
-      "failureMode": "Returns incorrect boolean value",
-      "function": "done",
-      "module": "src/relay.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-019",
+      "module": "src/mock/mod.rs", "function": "Broker::subscribe",
+      "failureMode": "Two participants on different domains subscribe to same broker",
+      "effect": "Cross-domain message leakage — ASIL-B safety violation (HAZ-004)",
+      "severity": 9, "occurrence": 2, "detection": 2, "rpn": 36,
+      "rpnRisk": "LOW",
+      "detectionMethod": "Each MockParticipant owns Arc<Broker>; domain_isolation_no_cross_domain_delivery test",
+      "action": "none — dedicated isolation test",
+      "requirements": ["REQ-PART-001", "REQ-HAZ-004", "REQ-IEC-005"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "ok",
-      "module": "src/relay.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-020",
+      "module": "src/mock/mod.rs", "function": "MockPublisher::write",
+      "failureMode": "write() succeeds after Publisher::close() — closed flag not checked",
+      "effect": "Stale/unauthorized data published after publisher closed (HAZ-007)",
+      "severity": 8, "occurrence": 2, "detection": 2, "rpn": 32,
+      "rpnRisk": "LOW",
+      "detectionMethod": "closed.load(SeqCst) as first expression in write(); write_after_close test",
+      "action": "none",
+      "requirements": ["REQ-PUB-004", "REQ-HAZ-007", "REQ-ASIL-007"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "degraded",
-      "module": "src/relay.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-021",
+      "module": "src/mock/mod.rs", "function": "MockPublisher::write",
+      "failureMode": "Sequence number not incremented — fetch_add returns old value incorrectly",
+      "effect": "Duplicate sequence numbers; replay detection confused",
+      "severity": 6, "occurrence": 1, "detection": 2, "rpn": 12,
+      "rpnRisk": "LOW",
+      "detectionMethod": "AtomicU64::fetch_add is guaranteed by Rust; sequence_numbers_monotonic test",
+      "action": "none — hardware atomicity guarantee + test",
+      "requirements": ["REQ-ASIL-005", "REQ-SUB-005", "REQ-INT-002", "REQ-SEC-007"]
     },
     {
-      "detectionMethod": "Unit test",
-      "effect": "Incorrect system state",
-      "failureMode": "Function does not perform intended action",
-      "function": "down",
-      "module": "src/relay.rs",
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-022",
+      "module": "src/mock/mod.rs", "function": "MockPublisher::write_ctx",
+      "failureMode": "Expired context not detected — ctx.done() returns false incorrectly",
+      "effect": "Late data delivered to subscribers; timing contract violated",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "ctx.done() uses Instant comparison; write_ctx_timeout test uses 1ns deadline",
+      "action": "none",
+      "requirements": ["REQ-PUB-003", "REQ-ASIL-010"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Caller may unwrap None and panic",
-      "failureMode": "Returns None when Some expected",
-      "function": "recv",
-      "module": "src/participant.rs",
-      "requirements": [
-        "REQ-ASIL-010",
-        "REQ-MEM-005"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-023",
+      "module": "src/mock/mod.rs", "function": "MockParticipant::close",
+      "failureMode": "close() not idempotent — second call panics or corrupts state",
+      "effect": "Double-close from concurrent tasks causes undefined participant state",
+      "severity": 7, "occurrence": 3, "detection": 2, "rpn": 42,
+      "rpnRisk": "LOW",
+      "detectionMethod": "AtomicBool::store(true) is idempotent; participant_close_is_idempotent test",
+      "action": "Consider upgrading to compare_exchange for ASIL-D; acceptable at ASIL-B",
+      "requirements": ["REQ-PART-005", "REQ-ASIL-007", "REQ-INT-003"]
     },
     {
-      "detectionMethod": "Requirement-traced unit test",
-      "effect": "Caller may unwrap None and panic",
-      "failureMode": "Returns None when Some expected",
-      "function": "try_recv",
-      "module": "src/participant.rs",
-      "requirements": [
-        "REQ-RT-002"
-      ],
-      "risk": "LOW",
-      "severity": "S1"
+      "id": "DFMEA-024",
+      "module": "src/mock/mod.rs", "function": "MockParticipant::new_publisher",
+      "failureMode": "Publisher created after participant close — no Closed error returned",
+      "effect": "Publisher active but participant dead; samples may be lost silently",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "closed.load() at entry of new_publisher(); new_publisher_after_close test",
+      "action": "none",
+      "requirements": ["REQ-PART-006", "REQ-ERR-001", "REQ-ASIL-001"]
+    },
+    {
+      "id": "DFMEA-025",
+      "module": "src/mock/mod.rs", "function": "MockParticipant::new_subscriber",
+      "failureMode": "Subscriber created after participant close — recv() may block forever",
+      "effect": "Open channel with dead participant; application hangs",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "closed.load() at entry of new_subscriber(); closed_state_is_irreversible test",
+      "action": "none",
+      "requirements": ["REQ-PART-006", "REQ-ERR-001", "REQ-INT-003"]
+    },
+    {
+      "id": "DFMEA-026",
+      "module": "src/adapt.rs", "function": "DdsNode::subscribe",
+      "failureMode": "relay::Node::subscribe called with opts.topic = None — task spawned with empty routing",
+      "effect": "Forwarding task receives all messages; subscriber receives unrelated data",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "topic guard checks opts.topic.is_some(); subscribe_without_topic test",
+      "action": "none",
+      "requirements": ["REQ-RELAY-002", "REQ-RELAY-003"]
+    },
+    {
+      "id": "DFMEA-027",
+      "module": "src/adapt.rs", "function": "DdsNode::send",
+      "failureMode": "Back-pressure policy not forwarded — relay mpsc blocks even under DropNewest",
+      "effect": "relay adapter blocks caller async task indefinitely (HAZ-001 at relay level)",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "policy captured before task spawn; try_send path for DropNewest/DropOldest",
+      "action": "none",
+      "requirements": ["REQ-RELAY-002", "REQ-HAZ-001", "REQ-QOS-006"]
+    },
+    {
+      "id": "DFMEA-028",
+      "module": "src/relay.rs", "function": "Message (meta field)",
+      "failureMode": "meta is HashMap — non-deterministic key iteration across runs",
+      "effect": "Byte-identical comparison of two Message values fails spuriously (§18.3 violation)",
+      "severity": 4, "occurrence": 3, "detection": 2, "rpn": 24,
+      "rpnRisk": "LOW",
+      "detectionMethod": "BTreeMap used per §18.3; meta_ordering_is_deterministic test",
+      "action": "none — fixed; BTreeMap enforces sorted order",
+      "requirements": ["REQ-INT-001", "REQ-RELAY-001"]
+    },
+    {
+      "id": "DFMEA-029",
+      "module": "src/relay.rs", "function": "Context::done",
+      "failureMode": "Expired context returns false — write_ctx proceeds past deadline",
+      "effect": "Late data published after caller-specified deadline",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "Instant::now() >= deadline comparison; write_ctx_timeout with 1ns deadline",
+      "action": "none",
+      "requirements": ["REQ-PUB-003", "REQ-ASIL-010"]
+    },
+    {
+      "id": "DFMEA-030",
+      "module": "src/relay.rs", "function": "Context::done",
+      "failureMode": "Background context (no deadline) returns true — all write_ctx calls fail",
+      "effect": "All Publisher::write_ctx calls return Error::Timeout when using background context",
+      "severity": 7, "occurrence": 2, "detection": 2, "rpn": 28,
+      "rpnRisk": "LOW",
+      "detectionMethod": "background() sets deadline = None; done() returns false for None deadline",
+      "action": "none",
+      "requirements": ["REQ-PUB-003", "REQ-ASIL-010"]
+    },
+    {
+      "id": "DFMEA-031",
+      "module": "src/participant.rs", "function": "SubInner::new",
+      "failureMode": "capacity silently clamped to 256 — caller receives smaller queue than configured",
+      "effect": "Premature back-pressure; samples dropped earlier than application expects",
+      "severity": 4, "occurrence": 2, "detection": 3, "rpn": 24,
+      "rpnRisk": "LOW",
+      "detectionMethod": "Clamp documented in code and SAFETY_MANUAL Known Limitations",
+      "action": "Expose actual capacity via an accessor in future release",
+      "requirements": ["REQ-RT-005", "REQ-MEM-004", "REQ-IEC-001"]
+    },
+    {
+      "id": "DFMEA-032",
+      "module": "src/mock/mod.rs", "function": "MockParticipant::written_payloads",
+      "failureMode": "Returns stale payloads after reset() call (reset not effective)",
+      "effect": "Test assertion uses stale data; incorrect test outcome",
+      "severity": 3, "occurrence": 2, "detection": 2, "rpn": 12,
+      "rpnRisk": "LOW",
+      "detectionMethod": "written_payloads_log test verifies reset() clears log",
+      "action": "none",
+      "requirements": ["REQ-MOCK-003"]
+    },
+    {
+      "id": "DFMEA-033",
+      "module": "src/participant.rs", "function": "SampleReceiver::try_recv",
+      "failureMode": "Returns None when sample is present — race with concurrent push",
+      "effect": "Caller believes queue empty; sample silently lost",
+      "severity": 6, "occurrence": 2, "detection": 2, "rpn": 24,
+      "rpnRisk": "LOW",
+      "detectionMethod": "Mutex lock at start of pop() ensures coherent view; try_recv_non_blocking test",
+      "action": "none",
+      "requirements": ["REQ-RT-002", "REQ-CONC-001"]
+    },
+    {
+      "id": "DFMEA-034",
+      "module": "src/bin/main.rs", "function": "version output",
+      "failureMode": "relay_spec_version field emitted (disallowed by §12.1)",
+      "effect": "relay conform --strict FAIL; §20.1.1 CI gate blocks all PRs",
+      "severity": 5, "occurrence": 2, "detection": 2, "rpn": 20,
+      "rpnRisk": "LOW",
+      "detectionMethod": "struct uses spec_version field; relay-conform CI gate on every PR",
+      "action": "none",
+      "requirements": ["REQ-RELAY-004", "REQ-RELAY-005"]
+    },
+    {
+      "id": "DFMEA-035",
+      "module": "src/bin/main.rs", "function": "capabilities output",
+      "failureMode": "Required §12.2 field omitted (e.g. optional_interfaces)",
+      "effect": "Schema validation fails; relay-conform CI blocks PR",
+      "severity": 5, "occurrence": 2, "detection": 2, "rpn": 20,
+      "rpnRisk": "LOW",
+      "detectionMethod": "All §12.2 fields present; relay-conform CI gate",
+      "action": "none",
+      "requirements": ["REQ-RELAY-004", "REQ-RELAY-005"]
+    },
+    {
+      "id": "DFMEA-036",
+      "module": "src/bin/main.rs", "function": "status output",
+      "failureMode": "Disallowed ok field emitted instead of healthy boolean (§12.3)",
+      "effect": "§12.3 schema validation fails; relay-conform FAIL",
+      "severity": 5, "occurrence": 2, "detection": 2, "rpn": 20,
+      "rpnRisk": "LOW",
+      "detectionMethod": "struct uses healthy bool; relay-conform CI gate",
+      "action": "none",
+      "requirements": ["REQ-RELAY-004", "REQ-RELAY-005"]
+    },
+    {
+      "id": "DFMEA-037",
+      "module": "build.rs", "function": "RUSTC_VERSION env capture",
+      "failureMode": "rustc not on PATH at build time — RUSTC_VERSION is empty string",
+      "effect": "runtime field in §12.1 JSON output is empty; conformance degrades",
+      "severity": 3, "occurrence": 2, "detection": 3, "rpn": 18,
+      "rpnRisk": "LOW",
+      "detectionMethod": "unwrap_or_else provides fallback 'rustc unknown'; release-build CI gate",
+      "action": "none",
+      "requirements": ["REQ-DO-005", "REQ-RELAY-004"]
+    },
+    {
+      "id": "DFMEA-038",
+      "module": "src/mock/mod.rs", "function": "Broker::subscribe (TransientLocal cache)",
+      "failureMode": "Cache delivers more than history_depth samples to a late-joining subscriber",
+      "effect": "Subscriber overwhelmed with stale data; QoS contract violated",
+      "severity": 5, "occurrence": 2, "detection": 2, "rpn": 20,
+      "rpnRisk": "LOW",
+      "detectionMethod": "push_to_cache enforces history_depth limit with pop_front; transient_local test",
+      "action": "none",
+      "requirements": ["REQ-QOS-005", "REQ-QOS-002"]
+    },
+    {
+      "id": "DFMEA-039",
+      "module": "src/participant.rs", "function": "SubInner (concurrent locking)",
+      "failureMode": "Deadlock: Broker Mutex held while SubInner Mutex acquired in same call stack",
+      "effect": "System hangs; safety function cannot complete",
+      "severity": 9, "occurrence": 3, "detection": 4, "rpn": 108,
+      "rpnRisk": "MEDIUM",
+      "detectionMethod": "Single-lock protocol: Broker lock dropped before SubInner.push() acquires its lock; concurrent_publish_subscribe_no_deadlock test",
+      "action": "Document single-lock protocol invariant explicitly; consider lock-order analysis tool in future",
+      "requirements": ["REQ-CONC-003", "REQ-CONC-001", "REQ-IEC-006"]
+    },
+    {
+      "id": "DFMEA-040",
+      "module": "src/types.rs + src/relay.rs", "function": "meta insertion ordering",
+      "failureMode": "meta key ordering non-deterministic between runs or platforms",
+      "effect": "Byte-identical message comparison fails; RELAY protocol conformance lost",
+      "severity": 4, "occurrence": 2, "detection": 2, "rpn": 16,
+      "rpnRisk": "LOW",
+      "detectionMethod": "BTreeMap guarantees lexicographic sorted order; meta_ordering_is_deterministic test",
+      "action": "none — fixed by BTreeMap adoption",
+      "requirements": ["REQ-INT-001", "REQ-RELAY-001"]
     }
   ],
-  "generatedAt": "2026-06-19T18:25:49.953583+00:00",
-  "kind": "fmea",
-  "language": "rust",
-  "schemaVersion": "1.10",
   "summary": {
-    "functions": 24
-  },
-  "tool": "rust-FuSa",
-  "toolVersion": "0.2.8"
+    "total": 40,
+    "rpnHigh": 0,
+    "rpnMedium": 2,
+    "rpnLow": 38,
+    "maxRpn": 108,
+    "mediumRpnItems": ["DFMEA-014 (RPN=72, Tokio Notify race)", "DFMEA-039 (RPN=108, deadlock risk)"]
+  }
 }

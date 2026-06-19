@@ -101,6 +101,7 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub seq: u64,
     // §18.3 specifies BTreeMap for deterministic key ordering in byte-identical comparisons.
+    //fusa:req REQ-INT-001
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub meta: BTreeMap<String, String>,
 }

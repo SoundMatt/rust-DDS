@@ -685,6 +685,221 @@
       "text": "CI MUST run `rsfusa check` and fail if any ERROR-level finding is reported (\u00a720.2).",
       "category": "functional",
       "criticality": "high"
+    },
+    {
+      "id": "REQ-DO-009",
+      "title": "MC/DC coverage objective (DO-178C DAL-A)",
+      "text": "Every condition in every Boolean decision in safety-relevant code shall be independently exercised to affect the decision outcome; test cases shall demonstrate Modified Condition/Decision Coverage per DO-178C \u00a76.4.4.2.",
+      "category": "functional-safety",
+      "standard": "DO-178C",
+      "dal": "A",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-DO-010",
+      "title": "Test independence (DO-178C DAL-A)",
+      "text": "Test cases shall be derived from requirements, not from implementation code; the author of tests shall have access only to the specification and not to the internal implementation details when designing test inputs and expected outputs.",
+      "category": "functional-safety",
+      "standard": "DO-178C",
+      "dal": "A",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-DO-011",
+      "title": "Robustness and fault-injection testing (DO-178C)",
+      "text": "The test suite shall include abnormal-input and boundary-violation tests for every external entry point: invalid domain values, empty topic strings, write after close, receive after unsubscribe, and expired context deadlines.",
+      "category": "functional-safety",
+      "standard": "DO-178C",
+      "dal": "A",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-DO-012",
+      "title": "Software partitioning (DO-178C \u00a72.5)",
+      "text": "Modules shall be partitioned so that a failure in one module cannot corrupt data structures in another; internal state shall be accessible only through the module's defined interface.",
+      "category": "functional-safety",
+      "standard": "DO-178C",
+      "dal": "A",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-DO-013",
+      "title": "Structural coverage reporting (DO-178C \u00a76.4.4)",
+      "text": "Statement and branch coverage shall be measured and reported for the test suite; CI shall record coverage metrics as a qualification evidence artefact.",
+      "category": "functional-safety",
+      "standard": "DO-178C",
+      "dal": "A",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-DO-014",
+      "title": "No deactivated code (DO-178C \u00a74.4.2)",
+      "text": "No deactivated or dead code shall exist in safety-relevant modules; cargo clippy with dead_code deny and release-mode builds shall catch all such paths.",
+      "category": "functional-safety",
+      "standard": "DO-178C",
+      "dal": "A",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-IEC-011",
+      "title": "Coding standard enforcement (IEC 61508-3 \u00a77.4.4)",
+      "text": "A defined coding standard shall be enforced on every commit: cargo fmt for style and cargo clippy -D warnings for safety lints; deviations require documented justification.",
+      "category": "functional-safety",
+      "standard": "IEC 61508",
+      "sil": "3",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-IEC-012",
+      "title": "Information hiding (IEC 61508-3 \u00a77.4.3)",
+      "text": "Internal mutable state (SubInner queue, Broker HashMap, AtomicBool flags) shall not be accessible outside their defining module; all access shall be through the public API.",
+      "category": "functional-safety",
+      "standard": "IEC 61508",
+      "sil": "3",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-IEC-013",
+      "title": "Single-responsibility modular design (IEC 61508-3 \u00a77.4.3)",
+      "text": "Each source module shall have a single documented responsibility as defined in BOUNDARY.md \u00a75; cross-module coupling shall be limited to the defined trait interfaces.",
+      "category": "functional-safety",
+      "standard": "IEC 61508",
+      "sil": "3",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-IEC-014",
+      "title": "Defensive programming at external entry points (IEC 61508-3 \u00a77.4.5)",
+      "text": "Every function reachable from untrusted input (domain creation, publisher/subscriber creation, write) shall validate all inputs before proceeding; validation shall precede any state mutation.",
+      "category": "functional-safety",
+      "standard": "IEC 61508",
+      "sil": "3",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-IEC-015",
+      "title": "Failure mode test coverage (IEC 61508-3 \u00a77.9)",
+      "text": "Every failure mode identified in fmea.json shall have at least one test that demonstrates the failure is detected and handled correctly; no FMEA entry shall be without a corresponding test.",
+      "category": "functional-safety",
+      "standard": "IEC 61508",
+      "sil": "3",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-CONC-003",
+      "title": "Deadlock freedom",
+      "text": "No code path shall acquire more than one mutex simultaneously; the single-lock protocol (one lock per SubInner push, one lock per Broker route, never nested) shall be maintained to guarantee deadlock freedom.",
+      "category": "concurrency",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-CONC-004",
+      "title": "Starvation freedom under back-pressure",
+      "text": "Under DropNewest or DropOldest back-pressure policies, a slow subscriber shall not prevent other subscribers or publishers from making progress; each SubInner has an independent queue and lock.",
+      "category": "concurrency",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-INT-001",
+      "title": "Deterministic meta ordering (BTreeMap)",
+      "text": "relay::Message.meta shall use BTreeMap<String, String> to guarantee deterministic iteration order of metadata keys, independent of insertion order, per RELAY spec \u00a718.3.",
+      "category": "integrity",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-INT-002",
+      "title": "Sequence number strict monotonicity",
+      "text": "The sequence_number in every Sample written by a single publisher shall be strictly greater than that of any previously written sample from the same publisher; the counter shall never decrease or reset during the publisher's lifetime.",
+      "category": "integrity",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-INT-003",
+      "title": "Irreversible closed-state transition",
+      "text": "Once a Participant or Publisher has been closed, the closed AtomicBool shall remain true; no operation shall transition the state back to open; subsequent close() calls shall succeed without side-effects.",
+      "category": "integrity",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-CM-001",
+      "title": "DCO commit sign-off",
+      "text": "Every commit merged to main shall carry a Developer Certificate of Origin Signed-off-by line; the DCO CI job shall block merges that violate this rule.",
+      "category": "configuration-management",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-CM-002",
+      "title": "Semantic version release tagging",
+      "text": "Every release of rust-DDS shall be tagged in the VCS with a semantic version (MAJOR.MINOR.PATCH) corresponding to the version in Cargo.toml; no release shall be distributed without a corresponding VCS tag.",
+      "category": "configuration-management",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-CM-003",
+      "title": "SBOM per release",
+      "text": "A Software Bill of Materials (sbom.json) shall be generated and committed for every release, listing all direct and transitive dependencies with version and license information.",
+      "category": "configuration-management",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-HAZ-001",
+      "title": "Back-pressure enforcement (HAZ-001, ASIL-B)",
+      "text": "The configured back-pressure policy shall be applied on every write; under DropNewest, arriving samples that would exceed channel_depth shall be silently discarded; under DropOldest, the oldest enqueued sample shall be removed; under Block, the caller shall wait.",
+      "category": "functional-safety",
+      "standard": "ISO 26262",
+      "asil": "B",
+      "hara": "HAZ-001",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-HAZ-002",
+      "title": "Payload integrity across transport (HAZ-002, ASIL-C)",
+      "text": "A payload written by a publisher shall be delivered byte-for-byte identical to all active subscribers on the same topic; no modification, truncation, or corruption shall occur in the in-process mock transport.",
+      "category": "functional-safety",
+      "standard": "ISO 26262",
+      "asil": "C",
+      "hara": "HAZ-002",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-HAZ-003",
+      "title": "Topic isolation \u2014 no cross-topic delivery (HAZ-003, ASIL-B)",
+      "text": "A sample published on topic A shall never be delivered to a subscriber on topic B; the Broker routing table shall use exact string equality for topic matching.",
+      "category": "functional-safety",
+      "standard": "ISO 26262",
+      "asil": "B",
+      "hara": "HAZ-003",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-HAZ-004",
+      "title": "Domain isolation \u2014 no cross-domain delivery (HAZ-004, ASIL-B)",
+      "text": "A participant created on domain D shall not receive messages published by a participant on a different domain D'; each MockParticipant holds its own isolated Broker instance.",
+      "category": "functional-safety",
+      "standard": "ISO 26262",
+      "asil": "B",
+      "hara": "HAZ-004",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-HAZ-005",
+      "title": "Unsubscribe closes recv channel (HAZ-005, ASIL-B)",
+      "text": "After Subscriber::unsubscribe() is called, SampleReceiver::recv() shall return None rather than blocking indefinitely; the channel shall be closed by the unsubscribe call per RELAY spec \u00a76.4.",
+      "category": "functional-safety",
+      "standard": "ISO 26262",
+      "asil": "B",
+      "hara": "HAZ-005",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-HAZ-007",
+      "title": "Write-after-close returns Error::Closed (HAZ-007, ASIL-B)",
+      "text": "Publisher::write or Publisher::write_ctx called after Publisher::close shall return Error::Closed and shall not deliver any payload to subscribers.",
+      "category": "functional-safety",
+      "standard": "ISO 26262",
+      "asil": "B",
+      "hara": "HAZ-007",
+      "criticality": "high"
     }
   ]
 }

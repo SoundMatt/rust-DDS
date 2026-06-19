@@ -31,9 +31,14 @@ use crate::types::{Domain, QoS, Sample};
 /// sync and async contexts without holding across await points.
 //fusa:req REQ-CONC-001
 //fusa:req REQ-CONC-002
+//fusa:req REQ-CONC-003 — single lock per SubInner; Broker lock is never held while SubInner lock is held
+//fusa:req REQ-CONC-004 — each SubInner has an independent queue; slow subscribers cannot block others
 //fusa:req REQ-IEC-006
+//fusa:req REQ-IEC-012 — queue, capacity, policy fields are pub(crate); not accessible outside crate
+//fusa:req REQ-IEC-014 — unsubscribed/closed flags checked at push() entry before any state mutation
 //fusa:req REQ-MEM-002
 //fusa:req REQ-ASIL-007
+//fusa:req REQ-INT-003 — closed flag is set with SeqCst store; never reset after being set true
 pub(crate) struct SubInner {
     pub(crate) queue: Mutex<VecDeque<Sample>>,
     pub(crate) capacity: usize,
@@ -105,6 +110,7 @@ impl SubInner {
         self.notify.notify_waiters();
     }
 
+    //fusa:req REQ-HAZ-005
     pub(crate) fn unsubscribe(&self) {
         self.unsubscribed.store(true, Ordering::SeqCst);
         // §6.4: after unsubscribe the channel MUST be closed so recv() can drain
