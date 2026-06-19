@@ -60,6 +60,53 @@ jobs:
       - name: Audit dependencies for known CVEs
         run: cargo audit
 
+  relay-conform:
+    name: RELAY §12 conformance — relay conform --strict (REQ-RELAY-004)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build RELAY CLI
+        run: |
+          git clone https://github.com/SoundMatt/RELAY /tmp/relay-src
+          cd /tmp/relay-src && go build -o /tmp/relay ./cmd/relay/
+      - name: Build rust-dds release binary
+        run: cargo build --release
+      - name: Validate §12.1/§12.2/§12.3 JSON schemas
+        run: /tmp/relay conform --strict ./target/release/rust-dds
+
+  rsfusa-check:
+    name: rsFuSa safety check — exits 1 on ERROR (REQ-ASIL, REQ-IEC, REQ-DO)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build rsfusa CLI
+        run: |
+          git clone https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
+          cd /tmp/rsfusa-src && cargo build --release
+          cp /tmp/rsfusa-src/target/release/rsfusa /tmp/rsfusa
+      - name: Run safety check gate
+        run: /tmp/rsfusa check
+
+  rsfusa-cyber:
+    name: rsFuSa cybersecurity check (REQ-SEC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build rsfusa CLI
+        run: |
+          git clone https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
+          cd /tmp/rsfusa-src && cargo build --release
+          cp /tmp/rsfusa-src/target/release/rsfusa /tmp/rsfusa
+      - name: Run cybersecurity check gate
+        run: /tmp/rsfusa cyber
+
   fusa-trace:
     name: FuSa traceability (REQ-IEC-003, REQ-IEC-004, REQ-DO-001)
     runs-on: ubuntu-latest
@@ -131,7 +178,7 @@ jobs:
       - name: Verify required safety and security documents exist
         run: |
           MISSING=0
-          for f in SECURITY.md SAFETY_PLAN.md requirements.json; do
+          for f in SECURITY.md SAFETY_PLAN.md requirements.json .fusa.json .fusa-reqs.json; do
             if [ ! -f "$f" ]; then
               echo "ERROR: required safety artifact missing: $f"
               MISSING=1
@@ -141,6 +188,8 @@ jobs:
           echo "All safety artifacts present."
       - name: Verify requirements.json is valid JSON
         run: python3 -c "import json; json.load(open('requirements.json')); print('requirements.json is valid JSON')"
+      - name: Verify .fusa.json is valid JSON
+        run: python3 -c "import json; json.load(open('.fusa.json')); print('.fusa.json is valid JSON')"
 
   dco:
     name: DCO

@@ -1,0 +1,15 @@
+{
+  "configVersion": "1.0",
+  "project": {
+    "name": "rust-DDS",
+    "version": "0.1.1"
+  },
+  "standard": "iso26262",
+  "sourceDirs": [
+    "src"
+  ],
+  "excludePatterns": [
+    "target/**"
+  ],
+  "strict": true
+}
