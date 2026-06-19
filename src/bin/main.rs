@@ -156,8 +156,7 @@ fn main() {
             match format {
                 Format::Json => println!(
                     "{}",
-                    serde_json::to_string_pretty(&s)
-                        .expect("Status serialization is infallible")
+                    serde_json::to_string_pretty(&s).expect("Status serialization is infallible")
                 ),
                 Format::Text => println!(
                     "rust-dds {} — healthy: {}, connected: {}",
