@@ -98,7 +98,7 @@ impl Sample {
     //fusa:req REQ-DO-007
     //fusa:req REQ-SEC-010
     pub fn to_message(&self) -> Message {
-        let mut meta = std::collections::HashMap::new();
+        let mut meta = std::collections::BTreeMap::new();
         meta.insert("dds.writer_guid".into(), hex::encode(self.writer_guid));
         Message {
             protocol: Protocol::Dds,
