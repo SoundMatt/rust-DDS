@@ -180,7 +180,7 @@ mod tests {
             protocol: "DDS",
             protocol_int: 2,
             version: "0.0.0",
-            spec_version: "1.10",
+            spec_version: "1.11",
             language: "rust",
             runtime: "rustc test",
         };
@@ -201,7 +201,7 @@ mod tests {
             protocol: "DDS",
             protocol_int: 2,
             version: "0.0.0",
-            spec_version: "1.10",
+            spec_version: "1.11",
             commands: vec!["version", "capabilities", "status"],
             transports: vec!["mock"],
             features: vec![],

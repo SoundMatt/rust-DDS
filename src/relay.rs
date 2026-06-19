@@ -5,7 +5,7 @@
 
 //! RELAY protocol types bundled locally until a relay-rs crate is published.
 //!
-//! These types mirror the RELAY spec v1.10 definitions for Rust (§18.3).
+//! These types mirror the RELAY spec v1.11 definitions for Rust (§18.3).
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
