@@ -8,7 +8,7 @@ repository = "https://github.com/SoundMatt/rust-DDS"
 homepage = "https://github.com/SoundMatt/rust-DDS"
 keywords = ["dds", "pubsub", "automotive", "embedded", "relay"]
 categories = ["embedded", "network-programming", "asynchronous"]
-rust-version = "1.75"
+rust-version = "1.85"
 
 [lib]
 name = "rust_dds"
