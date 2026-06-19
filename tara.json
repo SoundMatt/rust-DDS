@@ -1,80 +1,89 @@
 {
+  "schemaVersion": "1.10",
+  "kind": "tara",
+  "tool": "rust-FuSa",
+  "toolVersion": "0.2.8",
+  "language": "rust",
+  "standard": "iso21434",
+  "generatedAt": "2026-06-19T19:00:00.000000+00:00",
   "entries": [
     {
       "category": "security",
+      "cwe": "CWE-346",
+      "stride": "S",
+      "threat": "Spoofed publisher GUID: attacker constructs a sample with a writer_guid matching a trusted publisher, causing the subscriber to accept data from an untrusted source",
+      "riskRating": "HIGH",
+      "mitigation": "writer_guid is a 16-byte opaque token set by the local publisher (AtomicU64 counter + domain prefix); future RTPS transport must authenticate GUID origin via DDS-Security; tracked REQ-SEC-007, REQ-SEC-008",
+      "sourceRule": "TARA-DDS-001"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-20",
+      "stride": "T",
+      "threat": "Topic name injection: caller passes a crafted topic string containing path separators or control characters, causing broker misrouting or log injection",
+      "riskRating": "MEDIUM",
+      "mitigation": "Topic validated non-empty per REQ-SEC-001/REQ-SEC-013; exact HashMap key match prevents glob/wildcard expansion; future transport should add character allowlist",
+      "sourceRule": "TARA-DDS-002"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-400",
+      "stride": "D",
+      "threat": "Payload flooding DoS: high-rate publisher writes arbitrarily large payloads, exhausting subscriber queue memory and degrading real-time performance",
+      "riskRating": "HIGH",
+      "mitigation": "Back-pressure policy (DropNewest/DropOldest/Block) bounds queue depth per REQ-ASIL-008; payload size limit (REQ-SEC-002 PayloadTooLarge) deferred to RTPS transport milestone",
+      "sourceRule": "TARA-DDS-003"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-294",
+      "stride": "S",
+      "threat": "Sample replay attack: attacker captures a valid relay::Message and replays it to inject stale or duplicate data into a safety-critical subscriber",
+      "riskRating": "MEDIUM",
+      "mitigation": "Monotonic sequence numbers per REQ-ASIL-005 and REQ-SEC-007 allow duplicate detection; timestamp included in every Message; application layer must enforce freshness window; DDS-Security replay protection deferred to RTPS milestone",
+      "sourceRule": "TARA-DDS-004"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-284",
+      "stride": "E",
+      "threat": "Cross-domain data exfiltration: participant on domain D subscribes to topics intended for domain D+1 due to missing access control",
+      "riskRating": "HIGH",
+      "mitigation": "Each MockParticipant holds an isolated Broker; domains are fully partitioned per REQ-PART-001 and HAZ-004; future RTPS must enforce domain ID in UDP multicast group selection",
+      "sourceRule": "TARA-DDS-005"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-362",
+      "stride": "T",
+      "threat": "Race condition on subscriber close: concurrent close() and recv() calls could read from a partially-freed SubInner, producing undefined output",
+      "riskRating": "LOW",
+      "mitigation": "SubInner uses AtomicBool + Notify for lock-free, race-free close signalling per REQ-CONC-001 and REQ-IEC-006; Mutex protects the sample queue; no unsafe code per REQ-ASIL-002",
+      "sourceRule": "TARA-DDS-006"
+    },
+    {
+      "category": "security",
       "cwe": "CWE-502",
-      "mitigation": "validate structure and field bounds after deserialisation before use",
-      "riskRating": "MEDIUM",
-      "sourceRule": "CYBER010",
       "stride": "T",
-      "threat": "deserialisation of external data — ensure input is size-bounded and validated"
+      "threat": "Deserialisation of external DDS payload causes memory safety violation or logic error in application layer",
+      "riskRating": "MEDIUM",
+      "mitigation": "rust-DDS treats payloads as opaque Vec<u8>; no in-library deserialisation of application-level content; application owns decoding and must validate per REQ-SEC-004 and REQ-SEC-011",
+      "sourceRule": "TARA-DDS-007"
     },
     {
       "category": "security",
-      "cwe": "CWE-125",
-      "mitigation": "use .get(index) which returns Option instead of panicking on out-of-bounds",
+      "cwe": "CWE-770",
+      "stride": "D",
+      "threat": "Unbounded publisher creation exhausts system resources: caller creates thousands of publishers without closing them, filling the Mutex-protected HashMap",
       "riskRating": "MEDIUM",
-      "sourceRule": "CYBER011",
-      "stride": "T",
-      "threat": "direct slice indexing with a variable — consider .get() for bounds-safe access"
-    },
-    {
-      "category": "security",
-      "cwe": "CWE-134",
-      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
-      "riskRating": "MEDIUM",
-      "sourceRule": "CYBER019",
-      "stride": "T",
-      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
-    },
-    {
-      "category": "security",
-      "cwe": "CWE-134",
-      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
-      "riskRating": "MEDIUM",
-      "sourceRule": "CYBER019",
-      "stride": "T",
-      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
-    },
-    {
-      "category": "security",
-      "cwe": "CWE-134",
-      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
-      "riskRating": "MEDIUM",
-      "sourceRule": "CYBER019",
-      "stride": "T",
-      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
-    },
-    {
-      "category": "security",
-      "cwe": "CWE-134",
-      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
-      "riskRating": "MEDIUM",
-      "sourceRule": "CYBER019",
-      "stride": "T",
-      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
-    },
-    {
-      "category": "security",
-      "cwe": "CWE-134",
-      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
-      "riskRating": "MEDIUM",
-      "sourceRule": "CYBER019",
-      "stride": "T",
-      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
+      "mitigation": "Publisher lifecycle managed by caller; close() removes publisher state; future implementation should add per-participant publisher limit; tracked as resource exhaustion risk",
+      "sourceRule": "TARA-DDS-008"
     }
   ],
-  "generatedAt": "2026-06-19T18:26:05.889033+00:00",
-  "kind": "tara",
-  "language": "rust",
-  "schemaVersion": "1.10",
-  "standard": "iso21434",
   "summary": {
-    "high": 0,
-    "low": 0,
-    "medium": 7,
-    "total": 7
-  },
-  "tool": "rust-FuSa",
-  "toolVersion": "0.2.8"
+    "total": 8,
+    "high": 3,
+    "medium": 4,
+    "low": 1
+  }
 }
