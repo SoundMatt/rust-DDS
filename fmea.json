@@ -1,0 +1,273 @@
+{
+  "asilLevel": "UNCLASSIFIED",
+  "entries": [
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Caller receives unexpected error; may abort operation",
+      "failureMode": "Returns Err when Ok expected",
+      "function": "new",
+      "module": "src/types.rs",
+      "requirements": [
+        "REQ-PART-001"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Caller receives unexpected error; may abort operation",
+      "failureMode": "Returns Err when Ok expected",
+      "function": "validate_domain",
+      "module": "src/types.rs",
+      "requirements": [
+        "REQ-PART-001",
+        "REQ-ASIL-006",
+        "REQ-DO-006",
+        "REQ-IEC-002"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "to_message",
+      "module": "src/types.rs",
+      "requirements": [
+        "REQ-RELAY-001",
+        "REQ-DO-007",
+        "REQ-SEC-010"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Caller receives unexpected error; may abort operation",
+      "failureMode": "Returns Err when Ok expected",
+      "function": "from_message",
+      "module": "src/types.rs",
+      "requirements": [
+        "REQ-RELAY-001",
+        "REQ-SEC-004",
+        "REQ-SEC-011"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Caller receives unexpected error; may abort operation",
+      "failureMode": "Returns Err when Ok expected",
+      "function": "serialize",
+      "module": "src/types.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Caller receives unexpected error; may abort operation",
+      "failureMode": "Returns Err when Ok expected",
+      "function": "deserialize",
+      "module": "src/types.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Caller may unwrap None and panic",
+      "failureMode": "Returns None when Some expected",
+      "function": "as_relay",
+      "module": "src/error.rs",
+      "requirements": [
+        "REQ-ERR-003",
+        "REQ-SEC-014",
+        "REQ-IEC-009"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Caller receives unexpected error; may abort operation",
+      "failureMode": "Returns Err when Ok expected",
+      "function": "new",
+      "module": "src/mock/mod.rs",
+      "requirements": [
+        "REQ-MOCK-001"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "written_payloads",
+      "module": "src/mock/mod.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "reset",
+      "module": "src/mock/mod.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "to_message",
+      "module": "src/adapt.rs",
+      "requirements": [
+        "REQ-RELAY-001"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Caller receives unexpected error; may abort operation",
+      "failureMode": "Returns Err when Ok expected",
+      "function": "from_message",
+      "module": "src/adapt.rs",
+      "requirements": [
+        "REQ-RELAY-001"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "adapt",
+      "module": "src/adapt.rs",
+      "requirements": [
+        "REQ-RELAY-002"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "new",
+      "module": "src/relay.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Downstream computation produces incorrect result",
+      "failureMode": "Returns incorrect integer value (overflow or truncation)",
+      "function": "chan_depth",
+      "module": "src/relay.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "with_topic",
+      "module": "src/relay.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "background",
+      "module": "src/relay.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "with_timeout",
+      "module": "src/relay.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect conditional branch taken",
+      "failureMode": "Returns incorrect boolean value",
+      "function": "done",
+      "module": "src/relay.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "ok",
+      "module": "src/relay.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "degraded",
+      "module": "src/relay.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Unit test",
+      "effect": "Incorrect system state",
+      "failureMode": "Function does not perform intended action",
+      "function": "down",
+      "module": "src/relay.rs",
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Caller may unwrap None and panic",
+      "failureMode": "Returns None when Some expected",
+      "function": "recv",
+      "module": "src/participant.rs",
+      "requirements": [
+        "REQ-ASIL-010",
+        "REQ-MEM-005"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    },
+    {
+      "detectionMethod": "Requirement-traced unit test",
+      "effect": "Caller may unwrap None and panic",
+      "failureMode": "Returns None when Some expected",
+      "function": "try_recv",
+      "module": "src/participant.rs",
+      "requirements": [
+        "REQ-RT-002"
+      ],
+      "risk": "LOW",
+      "severity": "S1"
+    }
+  ],
+  "generatedAt": "2026-06-19T18:25:49.953583+00:00",
+  "kind": "fmea",
+  "language": "rust",
+  "schemaVersion": "1.10",
+  "summary": {
+    "functions": 24
+  },
+  "tool": "rust-FuSa",
+  "toolVersion": "0.2.8"
+}

@@ -1,0 +1,25 @@
+Function,Module,FailureMode,Effect,Severity,DetectionMethod,Risk,Requirements
+new,src/types.rs,Returns Err when Ok expected,Caller receives unexpected error; may abort operation,S1,Requirement-traced unit test,LOW,REQ-PART-001
+validate_domain,src/types.rs,Returns Err when Ok expected,Caller receives unexpected error; may abort operation,S1,Requirement-traced unit test,LOW,REQ-PART-001|REQ-ASIL-006|REQ-DO-006|REQ-IEC-002
+to_message,src/types.rs,Function does not perform intended action,Incorrect system state,S1,Requirement-traced unit test,LOW,REQ-RELAY-001|REQ-DO-007|REQ-SEC-010
+from_message,src/types.rs,Returns Err when Ok expected,Caller receives unexpected error; may abort operation,S1,Requirement-traced unit test,LOW,REQ-RELAY-001|REQ-SEC-004|REQ-SEC-011
+serialize,src/types.rs,Returns Err when Ok expected,Caller receives unexpected error; may abort operation,S1,Unit test,LOW,
+deserialize,src/types.rs,Returns Err when Ok expected,Caller receives unexpected error; may abort operation,S1,Unit test,LOW,
+as_relay,src/error.rs,Returns None when Some expected,Caller may unwrap None and panic,S1,Requirement-traced unit test,LOW,REQ-ERR-003|REQ-SEC-014|REQ-IEC-009
+new,src/mock/mod.rs,Returns Err when Ok expected,Caller receives unexpected error; may abort operation,S1,Requirement-traced unit test,LOW,REQ-MOCK-001
+written_payloads,src/mock/mod.rs,Function does not perform intended action,Incorrect system state,S1,Unit test,LOW,
+reset,src/mock/mod.rs,Function does not perform intended action,Incorrect system state,S1,Unit test,LOW,
+to_message,src/adapt.rs,Function does not perform intended action,Incorrect system state,S1,Requirement-traced unit test,LOW,REQ-RELAY-001
+from_message,src/adapt.rs,Returns Err when Ok expected,Caller receives unexpected error; may abort operation,S1,Requirement-traced unit test,LOW,REQ-RELAY-001
+adapt,src/adapt.rs,Function does not perform intended action,Incorrect system state,S1,Requirement-traced unit test,LOW,REQ-RELAY-002
+new,src/relay.rs,Function does not perform intended action,Incorrect system state,S1,Unit test,LOW,
+chan_depth,src/relay.rs,Returns incorrect integer value (overflow or truncation),Downstream computation produces incorrect result,S1,Unit test,LOW,
+with_topic,src/relay.rs,Function does not perform intended action,Incorrect system state,S1,Unit test,LOW,
+background,src/relay.rs,Function does not perform intended action,Incorrect system state,S1,Unit test,LOW,
+with_timeout,src/relay.rs,Function does not perform intended action,Incorrect system state,S1,Unit test,LOW,
+done,src/relay.rs,Returns incorrect boolean value,Incorrect conditional branch taken,S1,Unit test,LOW,
+ok,src/relay.rs,Function does not perform intended action,Incorrect system state,S1,Unit test,LOW,
+degraded,src/relay.rs,Function does not perform intended action,Incorrect system state,S1,Unit test,LOW,
+down,src/relay.rs,Function does not perform intended action,Incorrect system state,S1,Unit test,LOW,
+recv,src/participant.rs,Returns None when Some expected,Caller may unwrap None and panic,S1,Requirement-traced unit test,LOW,REQ-ASIL-010|REQ-MEM-005
+try_recv,src/participant.rs,Returns None when Some expected,Caller may unwrap None and panic,S1,Requirement-traced unit test,LOW,REQ-RT-002
