@@ -247,7 +247,7 @@ jobs:
         run: |
           MISSING=0
           for f in \
-            SECURITY.md SAFETY_PLAN.md SAFETY_MANUAL.md BOUNDARY.md \
+            SECURITY.md SAFETY_PLAN.md SAFETY_CASE.md SAFETY_MANUAL.md BOUNDARY.md \
             requirements.json \
             .fusa.json .fusa-reqs.json .fusa-hara.json \
             fmea.json fmea.csv tara.json tara.md \

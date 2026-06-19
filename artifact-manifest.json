@@ -8,6 +8,7 @@
   "format": "x-FuSa manifest v1",
   "artifacts": [
     { "path": "SAFETY_PLAN.md", "description": "Development safety plan and process description" },
+    { "path": "SAFETY_CASE.md", "description": "Safety case — GSN structured argument, ASIL-B/SIL-2/DAL-C claim with 7 residual gaps" },
     { "path": "SAFETY_MANUAL.md", "description": "Safety manual for system integrators (SEooC)" },
     { "path": "BOUNDARY.md", "description": "System boundary diagram and trust zone map" },
     { "path": "SECURITY.md", "description": "Security policy and vulnerability reporting" },
