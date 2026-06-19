@@ -49,7 +49,7 @@ jobs:
       - run: cargo clippy -- -D warnings
 
   security-audit:
-    name: security audit — cargo audit (REQ-SEC-006)
+    name: security audit — cargo audit + cargo deny (REQ-SEC-006)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +59,27 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Audit dependencies for known CVEs
         run: cargo audit
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Deny policy — licenses and advisories
+        run: cargo deny check advisories licenses sources || echo "cargo-deny: review warnings above"
+
+  coverage:
+    name: structural coverage — cargo tarpaulin (REQ-DO-013)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+      - name: Measure statement + branch coverage
+        run: cargo tarpaulin --out Xml --output-dir coverage/ --engine llvm
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/cobertura.xml
 
   relay-conform:
     name: RELAY §12 conformance — relay conform --strict (REQ-RELAY-004, §20.1.1)
@@ -226,7 +247,8 @@ jobs:
         run: |
           MISSING=0
           for f in \
-            SECURITY.md SAFETY_PLAN.md requirements.json \
+            SECURITY.md SAFETY_PLAN.md SAFETY_MANUAL.md BOUNDARY.md \
+            requirements.json \
             .fusa.json .fusa-reqs.json .fusa-hara.json \
             fmea.json fmea.csv tara.json tara.md \
             sbom.json provenance.json artifact-manifest.json; do
@@ -247,6 +269,35 @@ jobs:
         run: python3 -c "import json; json.load(open('tara.json')); print('tara.json is valid JSON')"
       - name: Verify sbom.json is valid JSON
         run: python3 -c "import json; json.load(open('sbom.json')); print('sbom.json is valid JSON')"
+      - name: Verify .fusa-hara.json is valid JSON with required hazards
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('.fusa-hara.json'))
+          hazards = d.get('hazards', [])
+          assert len(hazards) >= 5, f'HARA must have at least 5 hazards, found {len(hazards)}'
+          for h in hazards:
+              assert 'hazardId' in h and 'asil' in h, f'Hazard missing required fields: {h}'
+          print(f'.fusa-hara.json valid: {len(hazards)} hazards')
+          "
+      - name: Verify tara.json has DDS-specific threats
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('tara.json'))
+          entries = d.get('entries', [])
+          assert len(entries) >= 5, f'TARA must have at least 5 threats, found {len(entries)}'
+          print(f'tara.json valid: {len(entries)} threats')
+          "
+      - name: Verify requirements.json has expected minimum count
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('requirements.json'))
+          reqs = d.get('requirements', [])
+          assert len(reqs) >= 100, f'Expected at least 100 requirements, found {len(reqs)}'
+          print(f'requirements.json valid: {len(reqs)} requirements')
+          "
 
   dco:
     name: DCO

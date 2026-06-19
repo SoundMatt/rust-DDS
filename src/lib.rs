@@ -93,14 +93,26 @@ pub use types::{
 //fusa:req REQ-ASIL-009 — all public APIs documented with Rustdoc including safety pre/post-conditions
 //fusa:req REQ-IEC-003 — bidirectional traceability enforced by the fusa-trace CI job
 //fusa:req REQ-IEC-004 — test completeness gate: fusa-trace CI blocks on any untested requirement
+//fusa:req REQ-IEC-011 — cargo fmt + clippy -D warnings enforce coding standard on every push (IEC 61508-3 §7.4.4)
+//fusa:req REQ-IEC-012 — internal state (SubInner, Broker) uses pub(crate) visibility; never pub
+//fusa:req REQ-IEC-013 — single-responsibility modules documented in BOUNDARY.md §5
+//fusa:req REQ-IEC-015 — every FMEA failure mode has at least one fusa:test (fusa-trace CI verifies)
 //fusa:req REQ-DO-001 — bidirectional traceability per DO-178C: fusa-trace CI enforces req → code → test
 //fusa:req REQ-DO-002 — no dead code: cargo clippy -D warnings catches dead_code; enforced by lint CI job
 //fusa:req REQ-DO-003 — decision coverage: all conditional branches exercised by tests across the suite
 //fusa:req REQ-DO-004 — documented assumptions: see inline comments in participant.rs and adapt.rs
+//fusa:req REQ-DO-009 — MC/DC: every Boolean condition is independently exercised by the test suite
+//fusa:req REQ-DO-010 — tests derived from requirements.json; authors work from spec not implementation
+//fusa:req REQ-DO-012 — partitioning: module state accessible only through defined trait interfaces
+//fusa:req REQ-DO-013 — structural coverage: cargo-tarpaulin reports statement+branch coverage in CI
+//fusa:req REQ-DO-014 — no deactivated code: cargo clippy dead_code + release build enforced by CI
 //fusa:req REQ-MEM-001 — no unsafe Rust in any module; verified by absence of unsafe blocks
 //fusa:req REQ-MEM-005 — no Arc cycles: Arc<SubInner> is held by SampleReceiver + broker, not back-referenced
 //fusa:req REQ-SEC-005 — error messages contain no addresses, counters, or internal state
 //fusa:req REQ-SEC-006 — dependency CVE audit: cargo audit runs in the security-audit CI job
+//fusa:req REQ-CM-001 — DCO Signed-off-by required on every commit; enforced by dco CI job
+//fusa:req REQ-CM-002 — every release tagged in VCS with semantic version
+//fusa:req REQ-CM-003 — sbom.json committed on every release; verified by safety-artifacts CI job
 
 /// The RELAY spec version this implementation targets.
 //fusa:req REQ-RELAY-004

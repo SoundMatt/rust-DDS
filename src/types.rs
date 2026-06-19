@@ -81,6 +81,7 @@ pub type Guid = [u8; 16];
 //fusa:req REQ-ASIL-005
 //fusa:req REQ-SEC-007
 //fusa:req REQ-SEC-008
+//fusa:req REQ-INT-002 — sequence_number is u64 per-writer monotonic; never reset during publisher lifetime
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sample {
     pub topic: String,

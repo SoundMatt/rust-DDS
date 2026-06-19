@@ -1,5 +1,8 @@
 # Security Policy
 
+**Cybersecurity Assurance Level:** CAL-3 (ISO/SAE 21434)  
+**Security Development Level:** ML-3 (IEC 62443-4-1)
+
 ## Supported Versions
 
 | Version | Supported |
@@ -47,6 +50,22 @@ To run locally:
 cargo install cargo-audit
 cargo audit
 ```
+
+## Threat Analysis (TARA)
+
+The full Threat Analysis and Risk Assessment is in `tara.json` and `tara.md`.
+Eight DDS-specific STRIDE threats are identified (ISO/SAE 21434):
+
+| Threat ID | Category | Rating |
+|-----------|----------|--------|
+| TARA-DDS-001 | Spoofed publisher GUID | HIGH |
+| TARA-DDS-002 | Topic name injection | MEDIUM |
+| TARA-DDS-003 | Payload flooding DoS | HIGH |
+| TARA-DDS-004 | Sample replay attack | MEDIUM |
+| TARA-DDS-005 | Cross-domain exfiltration | HIGH |
+| TARA-DDS-006 | Race on subscriber close | LOW |
+| TARA-DDS-007 | Deserialisation of external payload | MEDIUM |
+| TARA-DDS-008 | Unbounded publisher creation | MEDIUM |
 
 ## Scope
 
