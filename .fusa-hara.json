@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "1.10",
+  "kind": "hara",
+  "tool": "rust-FuSa",
+  "toolVersion": "0.2.8",
+  "language": "rust",
+  "generatedAt": "2026-06-19T18:26:09.639639+00:00",
+  "hazards": [
+    {
+      "hazardId": "HAZ-001",
+      "description": "Example: Software produces incorrect output under load",
+      "situation": "High-rate input processing",
+      "severity": "S2",
+      "exposure": "E3",
+      "controllability": "C2",
+      "asil": "ASIL-B",
+      "mitigation": "Input rate limiting and output validation"
+    }
+  ]
+}

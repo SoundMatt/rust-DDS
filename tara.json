@@ -1,0 +1,80 @@
+{
+  "entries": [
+    {
+      "category": "security",
+      "cwe": "CWE-502",
+      "mitigation": "validate structure and field bounds after deserialisation before use",
+      "riskRating": "MEDIUM",
+      "sourceRule": "CYBER010",
+      "stride": "T",
+      "threat": "deserialisation of external data — ensure input is size-bounded and validated"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-125",
+      "mitigation": "use .get(index) which returns Option instead of panicking on out-of-bounds",
+      "riskRating": "MEDIUM",
+      "sourceRule": "CYBER011",
+      "stride": "T",
+      "threat": "direct slice indexing with a variable — consider .get() for bounds-safe access"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-134",
+      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
+      "riskRating": "MEDIUM",
+      "sourceRule": "CYBER019",
+      "stride": "T",
+      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-134",
+      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
+      "riskRating": "MEDIUM",
+      "sourceRule": "CYBER019",
+      "stride": "T",
+      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-134",
+      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
+      "riskRating": "MEDIUM",
+      "sourceRule": "CYBER019",
+      "stride": "T",
+      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-134",
+      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
+      "riskRating": "MEDIUM",
+      "sourceRule": "CYBER019",
+      "stride": "T",
+      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
+    },
+    {
+      "category": "security",
+      "cwe": "CWE-134",
+      "mitigation": "use a string literal as the format template; pass dynamic content as arguments",
+      "riskRating": "MEDIUM",
+      "sourceRule": "CYBER019",
+      "stride": "T",
+      "threat": "write!( called with non-literal first argument — ensure it is not user-controlled"
+    }
+  ],
+  "generatedAt": "2026-06-19T18:26:05.889033+00:00",
+  "kind": "tara",
+  "language": "rust",
+  "schemaVersion": "1.10",
+  "standard": "iso21434",
+  "summary": {
+    "high": 0,
+    "low": 0,
+    "medium": 7,
+    "total": 7
+  },
+  "tool": "rust-FuSa",
+  "toolVersion": "0.2.8"
+}
