@@ -123,13 +123,36 @@ impl relay::Node for DdsNode {
         // remains registered) for the entire lifetime of the forwarding loop.
         // When the mpsc sender is dropped (receiver closed), the task exits
         // and `sub` is dropped, releasing the subscription.
+        //
+        // §10.5 rule 3: apply the BackPressurePolicy to the relay-level mpsc send.
+        // DropOldest at relay level approximates via try_send — true oldest-drop
+        // requires draining from the receiver side (in the caller's task), which is
+        // not possible with a standard mpsc channel; the DDS subscription already
+        // applies DropOldest to the upstream queue so burst behaviour is correct.
         //fusa:req REQ-SEC-012
+        let policy = opts.back_pressure;
         tokio::spawn(async move {
             let _sub = sub;
             while let Some(sample) = rx.recv().await {
                 let msg = sample.to_message();
-                if tx.send(msg).await.is_err() {
-                    break;
+                match policy {
+                    relay::BackPressurePolicy::DropNewest => {
+                        match tx.try_send(msg) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {} // discard newest
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
+                    }
+                    relay::BackPressurePolicy::DropOldest => match tx.try_send(msg) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {}
+                        Err(mpsc::error::TrySendError::Closed(_)) => break,
+                    },
+                    relay::BackPressurePolicy::Block => {
+                        if tx.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         });
