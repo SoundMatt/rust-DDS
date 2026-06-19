@@ -199,7 +199,7 @@
     {
       "id": "REQ-RELAY-004",
       "title": "RELAY_SPEC_VERSION",
-      "text": "The crate shall export RELAY_SPEC_VERSION = \"1.10\" per RELAY spec \u00a719.4.",
+      "text": "The crate shall export RELAY_SPEC_VERSION = \"1.11\" per RELAY spec \u00a719.4.",
       "category": "functional",
       "criticality": "high"
     },
