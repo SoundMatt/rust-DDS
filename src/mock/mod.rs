@@ -215,7 +215,7 @@ impl MockParticipant {
     pub fn new(domain: Domain) -> Result<Arc<Self>, Error> {
         validate_domain(domain)?;
         let mut prefix = [0u8; 12];
-        prefix[0] = domain.0 as u8;
+        prefix[0] = domain.0 as u8; // safe: domain validated to [0,232] before this line
         Ok(Arc::new(Self {
             domain,
             broker: Broker::new(),

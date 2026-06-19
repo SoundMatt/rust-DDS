@@ -291,7 +291,7 @@ mod tests {
     fn sample_to_message_golden_vector() {
         let mut guid = Guid::default();
         for (i, b) in guid.iter_mut().enumerate() {
-            *b = (i + 1) as u8;
+            *b = (i + 1) as u8; // safe: i in [0,15] from enumerate on [u8;16], (i+1) in [1,16] fits u8
         }
         let ts = Utc.with_ymd_and_hms(1, 1, 1, 0, 0, 0).unwrap();
         let s = Sample {
@@ -318,7 +318,7 @@ mod tests {
     fn sample_round_trip() {
         let mut guid = Guid::default();
         for (i, b) in guid.iter_mut().enumerate() {
-            *b = (i + 1) as u8;
+            *b = (i + 1) as u8; // safe: i in [0,15] from enumerate on [u8;16], (i+1) in [1,16] fits u8
         }
         let orig = Sample {
             topic: "rt/chatter".into(),

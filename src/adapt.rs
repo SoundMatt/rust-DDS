@@ -264,7 +264,7 @@ mod tests {
     async fn to_message_round_trip() {
         let mut guid = crate::types::Guid::default();
         for (i, b) in guid.iter_mut().enumerate() {
-            *b = (i + 1) as u8;
+            *b = (i + 1) as u8; // safe: i in [0,15] from enumerate on [u8;16], (i+1) in [1,16] fits u8
         }
         let sample = Sample {
             topic: "rt/chatter".into(),
