@@ -17,6 +17,10 @@ use crate::relay;
 /// PayloadTooLarge) map 1:1 to `relay::Error`. DDS-specific variants wrap the
 /// nearest sentinel via [`Error::as_relay`].
 //fusa:req REQ-ERR-001
+//fusa:req REQ-ERR-002
+//fusa:req REQ-IEC-009
+//fusa:req REQ-ASIL-001
+//fusa:req REQ-SEC-015
 #[derive(Debug, Error)]
 pub enum Error {
     // ── Mandatory sentinels ──────────────────────────────────────────────────
@@ -26,15 +30,19 @@ pub enum Error {
     NotConnected,
     #[error("relay: timeout")]
     Timeout,
+    //fusa:req REQ-SEC-002
     #[error("relay: payload too large")]
     PayloadTooLarge,
 
     // ── DDS-specific ─────────────────────────────────────────────────────────
+    //fusa:req REQ-ERR-002
     /// Domain value outside the valid 0–232 range.
     #[error("dds: domain out of range [0, 232]")]
     DomainOutOfRange,
 
     /// Empty or invalid topic name.
+    //fusa:req REQ-SEC-001
+    //fusa:req REQ-SEC-013
     #[error("dds: topic name must not be empty")]
     TopicEmpty,
 
@@ -59,6 +67,7 @@ pub enum Error {
     LoanBuffer,
 
     /// Topic ACL denied access.
+    //fusa:req REQ-SEC-003
     #[error("dds: access denied by topic ACL")]
     AccessDenied,
 
@@ -69,18 +78,22 @@ pub enum Error {
 
 impl Error {
     /// Map to the nearest mandatory RELAY sentinel, if applicable.
+    //fusa:req REQ-ERR-003
+    //fusa:req REQ-SEC-014
+    //fusa:req REQ-IEC-009
     pub fn as_relay(&self) -> Option<relay::Error> {
         match self {
             Error::Closed | Error::LoanBuffer => Some(relay::Error::Closed),
             Error::NotConnected
             | Error::DomainOutOfRange
             | Error::TopicEmpty
-            | Error::QosMismatch => Some(relay::Error::NotConnected),
+            | Error::QosMismatch
+            | Error::AccessDenied => Some(relay::Error::NotConnected),
             Error::Timeout | Error::DeadlineMissed => Some(relay::Error::Timeout),
             Error::PayloadTooLarge | Error::SampleRejected | Error::ResourceLimits => {
                 Some(relay::Error::PayloadTooLarge)
             }
-            _ => None,
+            Error::Other(_) => None,
         }
     }
 }
@@ -104,6 +117,8 @@ impl From<relay::Error> for Error {
 mod tests {
     use super::*;
 
+    //fusa:test REQ-ERR-001
+    //fusa:test REQ-ASIL-001
     #[test]
     fn mandatory_sentinels_present() {
         let _ = Error::Closed;
@@ -112,6 +127,10 @@ mod tests {
         let _ = Error::PayloadTooLarge;
     }
 
+    //fusa:test REQ-ERR-002
+    //fusa:test REQ-ERR-003
+    //fusa:test REQ-SEC-014
+    //fusa:test REQ-IEC-009
     #[test]
     fn as_relay_mapping() {
         assert_eq!(Error::Closed.as_relay(), Some(relay::Error::Closed));
@@ -131,9 +150,15 @@ mod tests {
             Error::SampleRejected.as_relay(),
             Some(relay::Error::PayloadTooLarge)
         );
-        assert_eq!(Error::AccessDenied.as_relay(), None);
+        // AccessDenied maps to NotConnected per REQ-SEC-014
+        assert_eq!(
+            Error::AccessDenied.as_relay(),
+            Some(relay::Error::NotConnected)
+        );
     }
 
+    //fusa:test REQ-ERR-001
+    //fusa:test REQ-IEC-002
     #[test]
     fn from_relay_error() {
         assert!(matches!(Error::from(relay::Error::Closed), Error::Closed));

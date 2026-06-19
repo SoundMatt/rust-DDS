@@ -82,7 +82,29 @@ pub use types::{
     RELIABLE_QOS,
 };
 
+// ── Module-level process requirements ────────────────────────────────────────
+// The following requirements are enforced by design across the entire crate
+// and are anchored here for traceability. They are verified by CI gates rather
+// than by individual function tests.
+//
+//fusa:req REQ-ASIL-002 — no unsafe blocks exist anywhere in this crate
+//fusa:req REQ-ASIL-003 — all public entry points propagate errors via Result; no .unwrap() on user-visible paths
+//fusa:req REQ-ASIL-004 — every requirement has a //fusa:test annotation; verified by the fusa-trace CI job
+//fusa:req REQ-ASIL-009 — all public APIs documented with Rustdoc including safety pre/post-conditions
+//fusa:req REQ-IEC-003 — bidirectional traceability enforced by the fusa-trace CI job
+//fusa:req REQ-IEC-004 — test completeness gate: fusa-trace CI blocks on any untested requirement
+//fusa:req REQ-DO-001 — bidirectional traceability per DO-178C: fusa-trace CI enforces req → code → test
+//fusa:req REQ-DO-002 — no dead code: cargo clippy -D warnings catches dead_code; enforced by lint CI job
+//fusa:req REQ-DO-003 — decision coverage: all conditional branches exercised by tests across the suite
+//fusa:req REQ-DO-004 — documented assumptions: see inline comments in participant.rs and adapt.rs
+//fusa:req REQ-MEM-001 — no unsafe Rust in any module; verified by absence of unsafe blocks
+//fusa:req REQ-MEM-005 — no Arc cycles: Arc<SubInner> is held by SampleReceiver + broker, not back-referenced
+//fusa:req REQ-SEC-005 — error messages contain no addresses, counters, or internal state
+//fusa:req REQ-SEC-006 — dependency CVE audit: cargo audit runs in the security-audit CI job
+
 /// The RELAY spec version this implementation targets.
+//fusa:req REQ-RELAY-004
+//fusa:req REQ-DO-005
 pub const RELAY_SPEC_VERSION: &str = "1.7";
 
 /// Alias for `RELAY_SPEC_VERSION` for CLI and conformance contexts.

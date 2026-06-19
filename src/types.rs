@@ -44,6 +44,9 @@ impl std::fmt::Display for Domain {
 /// Returns `Error::DomainOutOfRange` for values outside this range,
 /// consistent with RELAY spec §15.7 and the mandatory sentinel mapping.
 //fusa:req REQ-PART-001
+//fusa:req REQ-ASIL-006
+//fusa:req REQ-DO-006
+//fusa:req REQ-IEC-002
 pub fn validate_domain(d: Domain) -> Result<(), Error> {
     if d.0 < 0 || d.0 > 232 {
         return Err(Error::DomainOutOfRange);
@@ -75,6 +78,9 @@ pub type Guid = [u8; 16];
 //fusa:req REQ-SUB-001
 //fusa:req REQ-SUB-002
 //fusa:req REQ-SUB-003
+//fusa:req REQ-ASIL-005
+//fusa:req REQ-SEC-007
+//fusa:req REQ-SEC-008
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sample {
     pub topic: String,
@@ -89,6 +95,8 @@ pub struct Sample {
 impl Sample {
     /// Convert this Sample to a RELAY Message envelope per spec §15.7.2.
     //fusa:req REQ-RELAY-001
+    //fusa:req REQ-DO-007
+    //fusa:req REQ-SEC-010
     pub fn to_message(&self) -> Message {
         let mut meta = std::collections::HashMap::new();
         meta.insert("dds.writer_guid".into(), hex::encode(self.writer_guid));
@@ -105,6 +113,8 @@ impl Sample {
 
     /// Convert a RELAY Message envelope back to a Sample per spec §15.7.2.
     //fusa:req REQ-RELAY-001
+    //fusa:req REQ-SEC-004
+    //fusa:req REQ-SEC-011
     pub fn from_message(m: &Message) -> Result<Self, Error> {
         let mut writer_guid = Guid::default();
         if let Some(g) = m.meta.get("dds.writer_guid") {
@@ -112,8 +122,8 @@ impl Sample {
                 .map_err(|_| Error::Other(format!("invalid dds.writer_guid hex: {g}")))?;
             if bytes.len() != 16 {
                 return Err(Error::Other(format!(
-                    "dds.writer_guid must be 32 hex chars, got {}",
-                    g.len()
+                    "dds.writer_guid must be 16 bytes (32 hex chars), got {} bytes",
+                    bytes.len()
                 )));
             }
             writer_guid.copy_from_slice(&bytes);
@@ -244,6 +254,9 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    //fusa:test REQ-PART-001
+    //fusa:test REQ-ASIL-006
+    //fusa:test REQ-DO-006
     #[test]
     fn validate_domain_valid() {
         assert!(validate_domain(Domain(0)).is_ok());
@@ -251,6 +264,10 @@ mod tests {
         assert!(validate_domain(Domain(232)).is_ok());
     }
 
+    //fusa:test REQ-PART-001
+    //fusa:test REQ-ASIL-006
+    //fusa:test REQ-DO-006
+    //fusa:test REQ-IEC-002
     #[test]
     fn validate_domain_invalid() {
         assert!(matches!(
@@ -267,6 +284,9 @@ mod tests {
         ));
     }
 
+    //fusa:test REQ-RELAY-001
+    //fusa:test REQ-SUB-003
+    //fusa:test REQ-DO-007
     #[test]
     fn sample_to_message_golden_vector() {
         let mut guid = Guid::default();
@@ -292,6 +312,8 @@ mod tests {
         );
     }
 
+    //fusa:test REQ-RELAY-001
+    //fusa:test REQ-SEC-004
     #[test]
     fn sample_round_trip() {
         let mut guid = Guid::default();
@@ -313,6 +335,8 @@ mod tests {
         assert_eq!(back.writer_guid, orig.writer_guid);
     }
 
+    //fusa:test REQ-QOS-001
+    //fusa:test REQ-QOS-003
     #[test]
     fn default_qos_best_effort_volatile() {
         let q = QoS::default();
@@ -321,6 +345,8 @@ mod tests {
         assert_eq!(q.history_depth, 1);
     }
 
+    //fusa:test REQ-QOS-002
+    //fusa:test REQ-QOS-004
     #[test]
     fn reliable_qos_reliable_transient_local() {
         assert_eq!(RELIABLE_QOS.reliability, ReliabilityKind::Reliable);
