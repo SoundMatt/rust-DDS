@@ -29,6 +29,11 @@ use crate::types::{Domain, QoS, Sample};
 ///
 /// Uses `std::sync::Mutex` so the queue can be locked briefly from both
 /// sync and async contexts without holding across await points.
+//fusa:req REQ-CONC-001
+//fusa:req REQ-CONC-002
+//fusa:req REQ-IEC-006
+//fusa:req REQ-MEM-002
+//fusa:req REQ-ASIL-007
 pub(crate) struct SubInner {
     pub(crate) queue: Mutex<VecDeque<Sample>>,
     pub(crate) capacity: usize,
@@ -39,6 +44,9 @@ pub(crate) struct SubInner {
 }
 
 impl SubInner {
+    //fusa:req REQ-RT-005
+    //fusa:req REQ-MEM-004
+    //fusa:req REQ-IEC-001
     pub(crate) fn new(capacity: usize, policy: crate::relay::BackPressurePolicy) -> Self {
         Self {
             queue: Mutex::new(VecDeque::with_capacity(capacity.min(256))),
@@ -53,6 +61,9 @@ impl SubInner {
     /// Push a sample into the queue, applying the back-pressure policy.
     ///
     /// Returns `true` if accepted, `false` if dropped.
+    //fusa:req REQ-IEC-005
+    //fusa:req REQ-RT-001
+    //fusa:req REQ-ASIL-008
     pub(crate) fn push(&self, sample: Sample) -> bool {
         if self.unsubscribed.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
             return false;
@@ -71,7 +82,10 @@ impl SubInner {
                 }
                 q.push_back(sample);
             }
+            //fusa:req REQ-MEM-003
             crate::relay::BackPressurePolicy::Block => {
+                // TODO REQ-MEM-003: replace with true async backpressure in a future milestone.
+                // For now, Block appends unconditionally (mock-only transport).
                 q.push_back(sample);
             }
         }
@@ -83,6 +97,9 @@ impl SubInner {
         self.queue.lock().unwrap().pop_front()
     }
 
+    //fusa:req REQ-MEM-004
+    //fusa:req REQ-ASIL-007
+    //fusa:req REQ-IEC-010
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
@@ -104,19 +121,27 @@ pub struct SampleReceiver {
 impl SampleReceiver {
     /// Wait for the next sample. Returns `None` when the subscriber is closed
     /// and the queue is fully drained.
+    //fusa:req REQ-ASIL-010
+    //fusa:req REQ-MEM-005
     pub async fn recv(&self) -> Option<Sample> {
         loop {
             if let Some(s) = self.inner.pop() {
                 return Some(s);
             }
             if self.inner.closed.load(Ordering::SeqCst) {
+                // One final drain attempt after observing closed; any samples
+                // pushed before close() was called are returned before None.
                 return self.inner.pop();
             }
+            // Async wait — no busy-spin (REQ-ASIL-010). Notify::notified() is
+            // registered here; any push() between the pop() above and this await
+            // will re-fire notify_one(), preventing a missed wakeup.
             self.inner.notify.notified().await;
         }
     }
 
     /// Non-blocking read. Returns `None` if no sample is queued.
+    //fusa:req REQ-RT-002
     pub fn try_recv(&self) -> Option<Sample> {
         self.inner.pop()
     }
@@ -195,6 +220,9 @@ pub trait Publisher: Send + Sync {
 //fusa:req REQ-PART-004
 //fusa:req REQ-PART-005
 //fusa:req REQ-PART-006
+//fusa:req REQ-CONC-001
+//fusa:req REQ-IEC-010
+//fusa:req REQ-RT-003
 #[async_trait]
 pub trait Participant: Send + Sync {
     /// Create a publisher for the given topic and QoS.

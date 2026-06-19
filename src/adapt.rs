@@ -51,9 +51,12 @@ pub fn from_message(m: &Message) -> Result<Sample, DdsError> {
 // DdsNode adapter
 // ---------------------------------------------------------------------------
 
+//fusa:req REQ-RELAY-002
+//fusa:req REQ-CONC-001
+//fusa:req REQ-SEC-012
 struct DdsNode {
     participant: Arc<dyn Participant>,
-    publishers: Mutex<HashMap<String, Box<dyn crate::participant::Publisher>>>,
+    publishers: Mutex<HashMap<String, Arc<dyn crate::participant::Publisher>>>,
     closed: std::sync::atomic::AtomicBool,
 }
 
@@ -71,17 +74,22 @@ impl relay::Node for DdsNode {
             return Err(relay::Error::Timeout);
         }
         let topic = &msg.id;
-        let mut pubs = self.publishers.lock().await;
-        if !pubs.contains_key(topic) {
-            let qos = QoS::default();
-            let pub_ = self
-                .participant
-                .new_publisher(topic, qos)
-                .await
-                .map_err(|e| e.as_relay().unwrap_or(relay::Error::NotConnected))?;
-            pubs.insert(topic.clone(), pub_);
-        }
-        let pub_ = pubs.get(topic).unwrap();
+        // Acquire the publisher, creating it on first use. The lock is released
+        // before write() is called so concurrent senders on different topics
+        // are not serialised by a single slow write.
+        let pub_ = {
+            let mut pubs = self.publishers.lock().await;
+            if !pubs.contains_key(topic) {
+                let qos = QoS::default();
+                let p = self
+                    .participant
+                    .new_publisher(topic, qos)
+                    .await
+                    .map_err(|e| e.as_relay().unwrap_or(relay::Error::NotConnected))?;
+                pubs.insert(topic.clone(), Arc::from(p));
+            }
+            Arc::clone(pubs.get(topic).unwrap())
+        }; // lock released here — write() runs without holding the map lock
         pub_.write(msg.payload)
             .await
             .map_err(|e| e.as_relay().unwrap_or(relay::Error::NotConnected))
@@ -95,6 +103,7 @@ impl relay::Node for DdsNode {
             return Err(relay::Error::Closed);
         }
         let depth = opts.chan_depth(64);
+        //fusa:req REQ-RELAY-003
         let topic = opts.topic.ok_or(relay::Error::NotConnected)?;
         let qos = QoS {
             channel_depth: depth,
@@ -102,7 +111,7 @@ impl relay::Node for DdsNode {
             ..QoS::default()
         };
 
-        let (rx, _sub) = self
+        let (rx, sub) = self
             .participant
             .new_subscriber(&topic, qos)
             .await
@@ -110,7 +119,13 @@ impl relay::Node for DdsNode {
 
         let (tx, out_rx) = mpsc::channel::<Message>(depth.max(1));
 
+        // Move `sub` into the task so it stays alive (and the subscription
+        // remains registered) for the entire lifetime of the forwarding loop.
+        // When the mpsc sender is dropped (receiver closed), the task exits
+        // and `sub` is dropped, releasing the subscription.
+        //fusa:req REQ-SEC-012
         tokio::spawn(async move {
+            let _sub = sub;
             while let Some(sample) = rx.recv().await {
                 let msg = sample.to_message();
                 if tx.send(msg).await.is_err() {
@@ -171,6 +186,9 @@ mod tests {
     use crate::types::Domain;
     use std::time::Duration;
 
+    //fusa:test REQ-RELAY-002
+    //fusa:test REQ-PUB-002
+    //fusa:test REQ-DO-008
     #[tokio::test]
     async fn adapt_send_and_subscribe() {
         let p = MockParticipant::new(Domain(0)).unwrap();
@@ -197,6 +215,8 @@ mod tests {
         assert_eq!(msg.protocol, Protocol::Dds);
     }
 
+    //fusa:test REQ-RELAY-003
+    //fusa:test REQ-IEC-002
     #[tokio::test]
     async fn subscribe_without_topic_returns_not_connected() {
         let p = MockParticipant::new(Domain(0)).unwrap();
@@ -208,6 +228,8 @@ mod tests {
         assert_eq!(err, relay::Error::NotConnected);
     }
 
+    //fusa:test REQ-ERR-001
+    //fusa:test REQ-PART-006
     #[tokio::test]
     async fn subscribe_after_close_returns_closed() {
         let p = MockParticipant::new(Domain(0)).unwrap();
@@ -217,6 +239,8 @@ mod tests {
         assert_eq!(err, relay::Error::Closed);
     }
 
+    //fusa:test REQ-PART-005
+    //fusa:test REQ-IEC-010
     #[tokio::test]
     async fn close_is_idempotent() {
         let p = MockParticipant::new(Domain(0)).unwrap();
@@ -225,6 +249,8 @@ mod tests {
         node.close().await.unwrap();
     }
 
+    //fusa:test REQ-RELAY-002
+    //fusa:test REQ-RELAY-004
     #[tokio::test]
     async fn protocol_is_dds() {
         let p = MockParticipant::new(Domain(0)).unwrap();
@@ -232,6 +258,8 @@ mod tests {
         assert_eq!(node.protocol(), Protocol::Dds);
     }
 
+    //fusa:test REQ-RELAY-001
+    //fusa:test REQ-DO-007
     #[tokio::test]
     async fn to_message_round_trip() {
         let mut guid = crate::types::Guid::default();

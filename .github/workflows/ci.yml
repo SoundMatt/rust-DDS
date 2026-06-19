@@ -18,7 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: ["1.75", stable]
+        rust: ["1.85", stable]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -26,6 +26,15 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
+
+  release-build:
+    name: release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --all-features
 
   lint:
     name: lint
@@ -38,6 +47,100 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
+
+  security-audit:
+    name: security audit (REQ-SEC-006)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies for known CVEs
+        run: cargo audit
+
+  fusa-trace:
+    name: FuSa traceability (REQ-IEC-003, REQ-IEC-004, REQ-DO-001)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check all requirements have fusa:req implementation annotations
+        run: |
+          MISSING_REQ=0
+          while IFS= read -r req_id; do
+            if ! grep -rq "//fusa:req ${req_id}" src/; then
+              echo "ERROR: ${req_id} has no //fusa:req annotation in src/"
+              MISSING_REQ=1
+            fi
+          done < <(python3 -c "
+          import json, sys
+          reqs = json.load(open('requirements.json'))['requirements']
+          for r in reqs: print(r['id'])
+          ")
+          if [ "$MISSING_REQ" -ne 0 ]; then
+            echo ""
+            echo "All requirements must have at least one //fusa:req annotation."
+            exit 1
+          fi
+          echo "All requirements have fusa:req annotations."
+      - name: Check all requirements have fusa:test test annotations
+        run: |
+          MISSING_TEST=0
+          while IFS= read -r req_id; do
+            if ! grep -rq "//fusa:test ${req_id}" src/; then
+              echo "ERROR: ${req_id} has no //fusa:test annotation in src/"
+              MISSING_TEST=1
+            fi
+          done < <(python3 -c "
+          import json, sys
+          reqs = json.load(open('requirements.json'))['requirements']
+          for r in reqs: print(r['id'])
+          ")
+          if [ "$MISSING_TEST" -ne 0 ]; then
+            echo ""
+            echo "All requirements must have at least one //fusa:test annotation."
+            exit 1
+          fi
+          echo "All requirements have fusa:test annotations."
+      - name: Check no orphan fusa tags reference unknown requirement IDs
+        run: |
+          ORPHAN=0
+          KNOWN=$(python3 -c "
+          import json
+          reqs = json.load(open('requirements.json'))['requirements']
+          for r in reqs: print(r['id'])
+          ")
+          while IFS= read -r tag; do
+            req_id=$(echo "$tag" | grep -oP 'REQ-[A-Z]+-\d+')
+            if ! echo "$KNOWN" | grep -qx "$req_id"; then
+              echo "ERROR: orphan tag referencing unknown ID: $req_id"
+              ORPHAN=1
+            fi
+          done < <(grep -rh "//fusa:" src/ | grep -oP 'REQ-[A-Z]+-\d+')
+          if [ "$ORPHAN" -ne 0 ]; then
+            exit 1
+          fi
+          echo "No orphan fusa tags found."
+
+  safety-artifacts:
+    name: safety artifacts (REQ-DO-001, REQ-ASIL-009)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify required safety and security documents exist
+        run: |
+          MISSING=0
+          for f in SECURITY.md SAFETY_PLAN.md requirements.json; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: required safety artifact missing: $f"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then exit 1; fi
+          echo "All safety artifacts present."
+      - name: Verify requirements.json is valid JSON
+        run: python3 -c "import json; json.load(open('requirements.json')); print('requirements.json is valid JSON')"
 
   dco:
     name: DCO

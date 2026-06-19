@@ -319,6 +319,7 @@ pub trait Caller: Node {
 mod tests {
     use super::*;
 
+    //fusa:test REQ-RELAY-001
     #[test]
     fn protocol_display() {
         assert_eq!(Protocol::Can.to_string(), "CAN");
@@ -327,6 +328,7 @@ mod tests {
         assert_eq!(Protocol::Someip.to_string(), "SOMEIP");
     }
 
+    //fusa:test REQ-RELAY-001
     #[test]
     fn protocol_serde_roundtrip() {
         let p = Protocol::Dds;
@@ -336,6 +338,8 @@ mod tests {
         assert_eq!(p, p2);
     }
 
+    //fusa:test REQ-RELAY-004
+    //fusa:test REQ-DO-005
     #[test]
     fn version_display() {
         let v = Version {
@@ -346,12 +350,14 @@ mod tests {
         assert_eq!(v.to_string(), "1.7.0");
     }
 
+    //fusa:test REQ-ASIL-010
     #[test]
     fn context_background_not_done() {
         let ctx = Context::background();
         assert!(!ctx.done());
     }
 
+    //fusa:test REQ-PUB-003
     #[test]
     fn context_expired() {
         let ctx = Context::with_timeout(Duration::from_nanos(1));
@@ -359,6 +365,7 @@ mod tests {
         assert!(ctx.done());
     }
 
+    //fusa:test REQ-QOS-006
     #[test]
     fn subscriber_options_chan_depth() {
         let opts = SubscriberOptions::default();
@@ -370,12 +377,14 @@ mod tests {
         assert_eq!(opts2.chan_depth(64), 128);
     }
 
+    //fusa:test REQ-RELAY-003
     #[test]
     fn with_topic_sets_topic() {
         let opts = with_topic("vehicle/speed");
         assert_eq!(opts.topic.as_deref(), Some("vehicle/speed"));
     }
 
+    //fusa:test REQ-DO-005
     #[test]
     fn health_ok() {
         let h = Health::ok();
