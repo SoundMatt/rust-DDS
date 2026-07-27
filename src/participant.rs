@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 
 use crate::error::Error;
-use crate::relay::Context;
+use crate::relay::{Context, SubscriberOptions};
 use crate::types::{Domain, QoS, Sample};
 
 // ---------------------------------------------------------------------------
@@ -239,7 +239,11 @@ pub trait Participant: Send + Sync {
     /// Returns `Error::TopicEmpty` if `topic` is empty.
     async fn new_publisher(&self, topic: &str, qos: QoS) -> Result<Box<dyn Publisher>, Error>;
 
-    /// Create a subscriber for the given topic and QoS.
+    /// Create a subscriber for the given topic, QoS, and channel options.
+    ///
+    /// Per RELAY spec §8.2, `qos` carries the DDS endpoint parameters
+    /// (reliability, durability, deadline, ...); `opts` carries channel-level
+    /// configuration (depth, back-pressure — §14) that is orthogonal to QoS.
     ///
     /// Returns `(SampleReceiver, Box<dyn Subscriber>)`:
     /// - `SampleReceiver` — used to receive samples.
@@ -250,6 +254,7 @@ pub trait Participant: Send + Sync {
         &self,
         topic: &str,
         qos: QoS,
+        opts: SubscriberOptions,
     ) -> Result<(SampleReceiver, Box<dyn Subscriber>), Error>;
 
     /// Return the domain this participant joined.

@@ -6,7 +6,7 @@ The `Participant` trait is stable. Implementations are swappable without changin
 
 [![CI](https://github.com/SoundMatt/rust-DDS/actions/workflows/ci.yml/badge.svg)](https://github.com/SoundMatt/rust-DDS/actions/workflows/ci.yml)
 
-**RELAY spec:** v1.7 · **Language:** Rust 2021 · **MSRV:** 1.75
+**RELAY spec:** see `rust-dds version --format json` (`spec_version`) or [`RELAY_SPEC_VERSION`](src/lib.rs) · **Language:** Rust 2021 · **MSRV:** 1.75
 
 ---
 
@@ -16,7 +16,7 @@ The `Participant` trait is stable. Implementations are swappable without changin
 |---|---|---|
 | `rust_dds` | Core `Participant`, `Publisher`, `Subscriber` traits, `Sample`, `QoS`, `Domain`, `Guid` | All |
 | `mock` | In-process broker — zero OS dependencies. Default for development and testing. | All |
-| `adapt` | RELAY v1.7 adapter — `adapt()`, `to_message()`, `from_message()` | All |
+| `adapt` | RELAY adapter — `adapt()`, `to_message()`, `from_message()` | All |
 | `relay` | Local RELAY types (Protocol, Message, Node, Context, SubscriberOptions) | All |
 
 Additional transports (RTPS, shmem, security, WaitSet) are planned — see [ROADMAP.md](ROADMAP.md).
@@ -40,6 +40,7 @@ use std::sync::Arc;
 use rust_dds::{
     mock::MockParticipant,
     participant::Participant,
+    relay::SubscriberOptions,
     types::{Domain, QoS},
 };
 
@@ -47,7 +48,7 @@ use rust_dds::{
 async fn main() {
     let p = MockParticipant::new(Domain(0)).unwrap();
 
-    let (rx, _sub) = p.new_subscriber("sensors/temperature", QoS::default()).await.unwrap();
+    let (rx, _sub) = p.new_subscriber("sensors/temperature", QoS::default(), SubscriberOptions::default()).await.unwrap();
     let pub_ = p.new_publisher("sensors/temperature", QoS::default()).await.unwrap();
 
     pub_.write(b"{\"value\": 21.5, \"unit\": \"celsius\"}".to_vec()).await.unwrap();
@@ -81,7 +82,7 @@ let pub_ = p.new_publisher("t/state", RELIABLE_QOS.clone()).await.unwrap();
 pub_.write(b"current-value".to_vec()).await.unwrap();
 
 // Late joiner immediately receives the cached sample
-let (rx, _) = p.new_subscriber("t/state", RELIABLE_QOS.clone()).await.unwrap();
+let (rx, _) = p.new_subscriber("t/state", RELIABLE_QOS.clone(), SubscriberOptions::default()).await.unwrap();
 let sample = rx.recv().await.unwrap();
 assert_eq!(sample.payload, b"current-value");
 ```
@@ -134,7 +135,7 @@ rust-dds status
 Stop delivery without closing the channel — drain buffered samples after unsubscribing:
 
 ```rust
-let (rx, sub) = p.new_subscriber("t/sensor", QoS::default()).await.unwrap();
+let (rx, sub) = p.new_subscriber("t/sensor", QoS::default(), SubscriberOptions::default()).await.unwrap();
 sub.unsubscribe();              // no more samples delivered
 let s = rx.try_recv();         // drain any already-buffered samples
 sub.close().await.unwrap();    // release resources
@@ -173,7 +174,7 @@ See [ROADMAP.md](ROADMAP.md) for per-milestone goals.
 - [x] `Participant`, `Publisher`, `Subscriber` traits
 - [x] `MockParticipant` — in-process broker, zero dependencies
 - [x] TransientLocal, back-pressure, sequence numbers, writer GUID
-- [x] `adapt()` — RELAY v1.7 Node adapter
+- [x] `adapt()` — RELAY Node adapter
 - [x] CLI binary
 
 ---

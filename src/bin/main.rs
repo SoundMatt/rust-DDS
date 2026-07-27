@@ -133,7 +133,7 @@ fn main() {
                     "writer_guid",
                     "sequence_number",
                 ],
-                interfaces: vec!["Node"],
+                interfaces: vec!["Participant"],
                 optional_interfaces: vec![],
                 adapt: true,
             };
@@ -205,7 +205,7 @@ mod tests {
             commands: vec!["version", "capabilities", "status"],
             transports: vec!["mock"],
             features: vec![],
-            interfaces: vec!["Node"],
+            interfaces: vec!["Participant"],
             optional_interfaces: vec![],
             adapt: true,
         };

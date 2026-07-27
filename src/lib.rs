@@ -15,6 +15,7 @@
 //! use rust_dds::{
 //!     mock::MockParticipant,
 //!     participant::Participant,
+//!     relay::SubscriberOptions,
 //!     types::{Domain, QoS},
 //! };
 //!
@@ -22,7 +23,7 @@
 //! async fn main() {
 //!     let p = MockParticipant::new(Domain(0)).unwrap();
 //!
-//!     let (rx, _sub) = p.new_subscriber("sensors/temperature", QoS::default()).await.unwrap();
+//!     let (rx, _sub) = p.new_subscriber("sensors/temperature", QoS::default(), SubscriberOptions::default()).await.unwrap();
 //!     let pub_ = p.new_publisher("sensors/temperature", QoS::default()).await.unwrap();
 //!
 //!     pub_.write(b"{\"value\": 21.5}".to_vec()).await.unwrap();
