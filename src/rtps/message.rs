@@ -385,6 +385,208 @@ pub fn decode_data_submessage(flags: u8, body: &[u8]) -> Result<DataSubmessage, 
 }
 
 // ---------------------------------------------------------------------------
+// HEARTBEAT submessage (RTPS 2.3 §9.4.5.5)
+// ---------------------------------------------------------------------------
+
+/// Parsed fields of a HEARTBEAT submessage. A reliable writer sends this
+/// after every write and periodically, advertising the sequence-number
+/// window currently retained in its send history. Matches go-DDS's
+/// `Heartbeat` struct.
+//fusa:req REQ-RTPS-043
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Heartbeat {
+    pub reader_entity_id: EntityId,
+    pub writer_entity_id: EntityId,
+    /// Lowest sequence number still in the writer's history.
+    pub first_sn: SequenceNumber,
+    /// Highest sequence number sent so far.
+    pub last_sn: SequenceNumber,
+    /// Monotonically increasing per writer.
+    pub count: i32,
+}
+
+/// Builds a full HEARTBEAT submessage (4-byte `SubmessageHeader` + 28-byte
+/// body). Body layout (RTPS 2.3 §9.4.5.5): `readerId`(4) + `writerId`(4) +
+/// `firstSN`(8) + `lastSN`(8) + `count`(4) = 28 bytes. Matches go-DDS's
+/// `marshalHeartbeat` byte-for-byte.
+//fusa:req REQ-RTPS-043
+pub fn encode_heartbeat_submessage(hb: Heartbeat) -> Vec<u8> {
+    let mut body = Vec::with_capacity(28);
+    hb.reader_entity_id.encode(&mut body);
+    hb.writer_entity_id.encode(&mut body);
+    hb.first_sn.encode(&mut body);
+    hb.last_sn.encode(&mut body);
+    body.extend_from_slice(&hb.count.to_le_bytes());
+
+    let mut out = Vec::with_capacity(SubmessageHeader::LEN + body.len());
+    let header = SubmessageHeader {
+        submessage_id: SUBMSG_HEARTBEAT,
+        flags: FLAG_ENDIANNESS,
+        octets_to_next_header: body.len() as u16,
+    };
+    header.encode(&mut out);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Decodes a `Heartbeat` from a HEARTBEAT submessage *body* (the bytes
+/// after the 4-byte `SubmessageHeader`). Matches go-DDS's `parseHeartbeat`.
+/// Never panics on truncated input (REQ-RTPS-009).
+//fusa:req REQ-RTPS-043
+//fusa:req REQ-RTPS-009
+pub fn decode_heartbeat_submessage(body: &[u8]) -> Result<Heartbeat, RtpsDecodeError> {
+    if body.len() < 28 {
+        return Err(RtpsDecodeError::Truncated {
+            expected: 28,
+            got: body.len(),
+        });
+    }
+    let reader_entity_id = EntityId::decode(&body[0..4])?;
+    let writer_entity_id = EntityId::decode(&body[4..8])?;
+    let first_sn = SequenceNumber::decode(&body[8..16])?;
+    let last_sn = SequenceNumber::decode(&body[16..24])?;
+    let count = i32::from_le_bytes([body[24], body[25], body[26], body[27]]);
+    Ok(Heartbeat {
+        reader_entity_id,
+        writer_entity_id,
+        first_sn,
+        last_sn,
+        count,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// ACKNACK submessage (RTPS 2.3 §9.4.5.1)
+// ---------------------------------------------------------------------------
+
+/// Parsed fields of an ACKNACK submessage. A reliable reader sends this to
+/// request retransmission of missing sequence numbers. Uses a fixed 32-bit
+/// bitmap (`numBits` is always emitted as 32, one bitmap word), matching
+/// go-DDS's `AckNack` struct.
+//fusa:req REQ-RTPS-044
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AckNack {
+    pub reader_entity_id: EntityId,
+    pub writer_entity_id: EntityId,
+    /// First missing sequence number (the cumulative-ACK watermark).
+    pub base: SequenceNumber,
+    /// Bit N set means `base + N` is missing.
+    pub bitmap: u32,
+    pub count: i32,
+}
+
+/// Builds a full ACKNACK submessage (4-byte `SubmessageHeader` + 28-byte
+/// body). Body layout (RTPS 2.3 §9.4.5.1): `readerId`(4) + `writerId`(4) +
+/// `base`(8) + `numBits`(4, always 32) + `bitmap`(4) + `count`(4) = 28
+/// bytes. Matches go-DDS's `marshalAckNack` byte-for-byte.
+//fusa:req REQ-RTPS-044
+pub fn encode_acknack_submessage(an: AckNack) -> Vec<u8> {
+    let mut body = Vec::with_capacity(28);
+    an.reader_entity_id.encode(&mut body);
+    an.writer_entity_id.encode(&mut body);
+    an.base.encode(&mut body);
+    body.extend_from_slice(&32u32.to_le_bytes()); // numBits
+    body.extend_from_slice(&an.bitmap.to_le_bytes());
+    body.extend_from_slice(&an.count.to_le_bytes());
+
+    let mut out = Vec::with_capacity(SubmessageHeader::LEN + body.len());
+    let header = SubmessageHeader {
+        submessage_id: SUBMSG_ACKNACK,
+        flags: FLAG_ENDIANNESS,
+        octets_to_next_header: body.len() as u16,
+    };
+    header.encode(&mut out);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Decodes an `AckNack` from an ACKNACK submessage *body* (the bytes after
+/// the 4-byte `SubmessageHeader`). The `numBits` field (body[16..20]) is
+/// ignored on decode — this crate, like go-DDS, always treats the bitmap as
+/// exactly 32 bits. Matches go-DDS's `parseAckNack`. Never panics on
+/// truncated input (REQ-RTPS-009).
+//fusa:req REQ-RTPS-044
+//fusa:req REQ-RTPS-009
+pub fn decode_acknack_submessage(body: &[u8]) -> Result<AckNack, RtpsDecodeError> {
+    if body.len() < 28 {
+        return Err(RtpsDecodeError::Truncated {
+            expected: 28,
+            got: body.len(),
+        });
+    }
+    let reader_entity_id = EntityId::decode(&body[0..4])?;
+    let writer_entity_id = EntityId::decode(&body[4..8])?;
+    let base = SequenceNumber::decode(&body[8..16])?;
+    // body[16..20] = numBits — ignored, always treated as 32.
+    let bitmap = u32::from_le_bytes([body[20], body[21], body[22], body[23]]);
+    let count = i32::from_le_bytes([body[24], body[25], body[26], body[27]]);
+    Ok(AckNack {
+        reader_entity_id,
+        writer_entity_id,
+        base,
+        bitmap,
+        count,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// GAP submessage (RTPS 2.3 §9.4.5.4)
+// ---------------------------------------------------------------------------
+
+/// Indicates a contiguous range of sequence numbers that are permanently
+/// unavailable from a writer (evicted from its history). Receiving a GAP
+/// tells a reader to advance its expected-SN watermark past the covered
+/// range. Matches go-DDS's `Gap` struct.
+///
+/// Encode-only (like go-DDS itself, which sends GAP but never parses one
+/// back on receipt — see `handleAckNack` in `participant.go`; no
+/// `parseGAP`/`submsgGAP` case exists in go-DDS's own `handleDataPacket`
+/// switch): a reliable reader that never receives its requested samples
+/// falls back to re-NACKing on every subsequent periodic HEARTBEAT rather
+/// than consuming a GAP directly, exactly mirroring go-DDS's own current
+/// behavior (a documented parity decision, not a rust-DDS-only gap).
+//fusa:req REQ-RTPS-045
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Gap {
+    pub reader_entity_id: EntityId,
+    pub writer_entity_id: EntityId,
+    /// First irrelevant sequence number (inclusive).
+    pub gap_start: SequenceNumber,
+    /// Last irrelevant sequence number (inclusive).
+    pub gap_end: SequenceNumber,
+}
+
+/// Builds a full GAP submessage covering `[g.gap_start, g.gap_end]`
+/// inclusive (4-byte `SubmessageHeader` + 28-byte body). Body layout
+/// (RTPS 2.3 §9.4.5.4): `readerId`(4) + `writerId`(4) + `gapStart`(8) +
+/// `gapList`(`bitmapBase`(8) + `numBits`(4)) = 28 bytes. `gapList`'s
+/// `bitmapBase` is set to `gap_end.low + 1` with `numBits = 0` (no extra
+/// bitmap words), so the contiguous gap `[gap_start, bitmapBase - 1]` =
+/// `[gap_start, gap_end]` is declared. Matches go-DDS's `marshalGAP`
+/// byte-for-byte.
+//fusa:req REQ-RTPS-045
+pub fn encode_gap_submessage(g: Gap) -> Vec<u8> {
+    let mut body = Vec::with_capacity(28);
+    g.reader_entity_id.encode(&mut body);
+    g.writer_entity_id.encode(&mut body);
+    g.gap_start.encode(&mut body);
+    // gapList.bitmapBase = first SN *after* the gap = gap_end.low + 1.
+    body.extend_from_slice(&g.gap_end.high.to_le_bytes());
+    body.extend_from_slice(&g.gap_end.low.wrapping_add(1).to_le_bytes());
+    body.extend_from_slice(&0u32.to_le_bytes()); // numBits = 0, no bitmap words
+
+    let mut out = Vec::with_capacity(SubmessageHeader::LEN + body.len());
+    let header = SubmessageHeader {
+        submessage_id: SUBMSG_GAP,
+        flags: FLAG_ENDIANNESS,
+        octets_to_next_header: body.len() as u16,
+    };
+    header.encode(&mut out);
+    out.extend_from_slice(&body);
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Submessage iteration (RTPS 2.3 §9.4.2)
 // ---------------------------------------------------------------------------
 
@@ -856,6 +1058,152 @@ mod tests {
         assert_eq!(parsed[1].id, SUBMSG_DATA);
         assert_eq!(parsed[1].flags, 0x5);
         assert_eq!(parsed[1].body.len(), 20);
+    }
+
+    // Reference bytes reproduced from go-DDS's actual rtps package (real
+    // marshalHeartbeat/marshalAckNack/marshalGAP/parseHeartbeat/parseAckNack,
+    // not reimplemented). Go reproduction (package-local scratch test file,
+    // `rtps/zzrepro_reliable_test.go`, never committed to go-DDS, deleted
+    // after use):
+    //
+    //   readerEID := EntityIdUnknown
+    //   writerEID := entityIdForWriter(1) // -> 00000103
+    //
+    //   hb := Heartbeat{ReaderEntityId: readerEID, WriterEntityId: writerEID,
+    //       FirstSN: SequenceNumber{High: 0, Low: 1},
+    //       LastSN:  SequenceNumber{High: 0, Low: 5}, Count: 3}
+    //   fmt.Printf("%x\n", marshalHeartbeat(hb))
+    //   // -> 07011c0000000000000001030000000001000000000000000500000003000000
+    //
+    //   an := AckNack{ReaderEntityId: entityIdForReader(2), WriterEntityId: writerEID,
+    //       Base: SequenceNumber{High: 0, Low: 3}, Bitmap: 0b101, Count: 7}
+    //   fmt.Printf("%x\n", marshalAckNack(an))
+    //   // -> 06011c0000000204000001030000000003000000200000000500000007000000
+    //
+    //   g := Gap{ReaderEntityId: entityIdForReader(2), WriterEntityId: writerEID,
+    //       GapStart: SequenceNumber{High: 0, Low: 1}, GapEnd: SequenceNumber{High: 0, Low: 4}}
+    //   fmt.Printf("%x\n", marshalGAP(g))
+    //   // -> 08011c0000000204000001030000000001000000000000000500000000000000
+    //
+    //   hbParsed, ok := parseHeartbeat(hbMsg[4:])
+    //   // ok=true {ReaderEntityId:00000000 WriterEntityId:00000103 FirstSN:{0 1} LastSN:{0 5} Count:3}
+    //   anParsed, ok := parseAckNack(anMsg[4:])
+    //   // ok=true {ReaderEntityId:00000204 WriterEntityId:00000103 Base:{0 3} Bitmap:5 Count:7}
+    //
+    // Full run: `go test ./rtps/... -run TestZZReproReliableBytes -v`
+    // (go-DDS commit e9b36f5 / rust-DDS branch feat/rtps-reliable-qos).
+
+    //fusa:test REQ-RTPS-043
+    #[test]
+    fn encode_heartbeat_submessage_matches_go_dds_reference() {
+        use crate::rtps::guid::ENTITYID_UNKNOWN;
+
+        let hb = Heartbeat {
+            reader_entity_id: ENTITYID_UNKNOWN,
+            writer_entity_id: crate::rtps::guid::entity_id_for_writer(1),
+            first_sn: SequenceNumber { high: 0, low: 1 },
+            last_sn: SequenceNumber { high: 0, low: 5 },
+            count: 3,
+        };
+        let msg = encode_heartbeat_submessage(hb);
+        assert_eq!(
+            hex::encode(&msg),
+            "07011c0000000000000001030000000001000000000000000500000003000000"
+        );
+        assert_eq!(msg.len(), 32);
+    }
+
+    //fusa:test REQ-RTPS-043
+    #[test]
+    fn heartbeat_round_trip() {
+        use crate::rtps::guid::ENTITYID_UNKNOWN;
+
+        let hb = Heartbeat {
+            reader_entity_id: ENTITYID_UNKNOWN,
+            writer_entity_id: crate::rtps::guid::entity_id_for_writer(1),
+            first_sn: SequenceNumber { high: 0, low: 1 },
+            last_sn: SequenceNumber { high: 0, low: 5 },
+            count: 3,
+        };
+        let msg = encode_heartbeat_submessage(hb);
+        let decoded = decode_heartbeat_submessage(&msg[SubmessageHeader::LEN..]).unwrap();
+        assert_eq!(decoded, hb);
+    }
+
+    //fusa:test REQ-RTPS-043
+    //fusa:test REQ-RTPS-009
+    #[test]
+    fn decode_heartbeat_submessage_rejects_truncated_input_without_panicking() {
+        assert_eq!(
+            decode_heartbeat_submessage(&[0u8; 27]),
+            Err(RtpsDecodeError::Truncated {
+                expected: 28,
+                got: 27
+            })
+        );
+    }
+
+    //fusa:test REQ-RTPS-044
+    #[test]
+    fn encode_acknack_submessage_matches_go_dds_reference() {
+        let an = AckNack {
+            reader_entity_id: crate::rtps::guid::entity_id_for_reader(2),
+            writer_entity_id: crate::rtps::guid::entity_id_for_writer(1),
+            base: SequenceNumber { high: 0, low: 3 },
+            bitmap: 0b101,
+            count: 7,
+        };
+        let msg = encode_acknack_submessage(an);
+        assert_eq!(
+            hex::encode(&msg),
+            "06011c0000000204000001030000000003000000200000000500000007000000"
+        );
+        assert_eq!(msg.len(), 32);
+    }
+
+    //fusa:test REQ-RTPS-044
+    #[test]
+    fn acknack_round_trip() {
+        let an = AckNack {
+            reader_entity_id: crate::rtps::guid::entity_id_for_reader(2),
+            writer_entity_id: crate::rtps::guid::entity_id_for_writer(1),
+            base: SequenceNumber { high: 0, low: 3 },
+            bitmap: 0b101,
+            count: 7,
+        };
+        let msg = encode_acknack_submessage(an);
+        let decoded = decode_acknack_submessage(&msg[SubmessageHeader::LEN..]).unwrap();
+        assert_eq!(decoded, an);
+    }
+
+    //fusa:test REQ-RTPS-044
+    //fusa:test REQ-RTPS-009
+    #[test]
+    fn decode_acknack_submessage_rejects_truncated_input_without_panicking() {
+        assert_eq!(
+            decode_acknack_submessage(&[0u8; 10]),
+            Err(RtpsDecodeError::Truncated {
+                expected: 28,
+                got: 10
+            })
+        );
+    }
+
+    //fusa:test REQ-RTPS-045
+    #[test]
+    fn encode_gap_submessage_matches_go_dds_reference() {
+        let g = Gap {
+            reader_entity_id: crate::rtps::guid::entity_id_for_reader(2),
+            writer_entity_id: crate::rtps::guid::entity_id_for_writer(1),
+            gap_start: SequenceNumber { high: 0, low: 1 },
+            gap_end: SequenceNumber { high: 0, low: 4 },
+        };
+        let msg = encode_gap_submessage(g);
+        assert_eq!(
+            hex::encode(&msg),
+            "08011c0000000204000001030000000001000000000000000500000000000000"
+        );
+        assert_eq!(msg.len(), 32);
     }
 
     //fusa:test REQ-RTPS-022

@@ -105,6 +105,7 @@
 //! `Participant`/`Publisher`/`Subscriber`.
 
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -121,9 +122,13 @@ use super::guid::{
     entity_id_for_reader, entity_id_for_writer, EntityId, Guid, GuidPrefix, ENTITYID_UNKNOWN,
 };
 use super::message::{
-    decode_data_submessage, encode_data_submessage, wrap_in_rtps_message, Header, SequenceNumber,
-    SubmessageIter, VendorId, PROTOCOL_VERSION_2_3, SUBMSG_DATA,
+    decode_acknack_submessage, decode_data_submessage, decode_heartbeat_submessage,
+    encode_acknack_submessage, encode_data_submessage, encode_gap_submessage,
+    encode_heartbeat_submessage, wrap_in_rtps_message, AckNack, Gap, Header, Heartbeat,
+    SequenceNumber, SubmessageIter, VendorId, PROTOCOL_VERSION_2_3, SUBMSG_ACKNACK, SUBMSG_DATA,
+    SUBMSG_HEARTBEAT,
 };
+use super::reliable::{RecvTracker, SendHistory, HEARTBEAT_PERIOD};
 use super::sedp::SedpService;
 use super::transport::{RtpsDatagram, RtpsSocket};
 
@@ -131,8 +136,7 @@ use super::transport::{RtpsDatagram, RtpsSocket};
 // ReaderState / WriterState
 // ---------------------------------------------------------------------------
 
-/// Per-reader bookkeeping. Matches go-DDS's `rtpsReader` (the delivery-path
-/// subset relevant to BestEffort — reliability trackers are sub-phase 7).
+/// Per-reader bookkeeping. Matches go-DDS's `rtpsReader`.
 struct ReaderState {
     topic: String,
     /// SEDP-matched remote writer `Guid`s this reader accepts samples from,
@@ -142,17 +146,43 @@ struct ReaderState {
     /// `rtpsReader.sources`.
     sources: RwLock<HashSet<Guid>>,
     inner: Arc<SubInner>,
+    /// Whether this reader participates in Reliable QoS (HEARTBEAT/ACKNACK
+    /// gap tracking — sub-phase 7). `false` for BestEffort readers, which
+    /// never populate `trackers` or send ACKNACK. Matches go-DDS's
+    /// `rtpsReader.reliable`.
+    reliable: bool,
+    /// Per-remote-writer gap trackers, populated lazily on first contact
+    /// (DATA or HEARTBEAT) with each writer. Only ever non-empty when
+    /// `reliable == true`. Matches go-DDS's `rtpsReader.trackers`.
+    trackers: RwLock<HashMap<Guid, Arc<RecvTracker>>>,
 }
 
-/// Per-writer bookkeeping. Matches go-DDS's `rtpsWriter` (the BestEffort
-/// delivery-path subset — `history`/`hbDone`/`drainCh` are reliable-QoS-only
-/// fields, sub-phase 7). The topic name itself lives on [`RtpsWriter`], not
-/// here — this table only needs to track sequence-number assignment per
-/// registered writer entity.
+/// Per-writer bookkeeping. Matches go-DDS's `rtpsWriter`. The topic name is
+/// duplicated here (in addition to living on [`RtpsWriter`]) because
+/// participant-level reliability handlers ([`RtpsParticipant::send_heartbeat`],
+/// [`RtpsParticipant::handle_acknack`]) are keyed by `EntityId` alone (from
+/// a decoded submessage) and need the topic to resolve matched reader
+/// locators — go-DDS's equivalent code gets this for free because its
+/// `p.writers` map stores the whole `*rtpsWriter`, topic included.
 struct WriterState {
+    topic: String,
     /// Next sequence number to assign; matches go-DDS's `rtpsWriter.seq`
     /// (full 64-bit, pre-increment — see [`RtpsWriter::write`]).
     seq: AtomicU64,
+    /// Whether this writer participates in Reliable QoS (HEARTBEAT sending,
+    /// send-history retention, ACKNACK-driven retransmission — sub-phase
+    /// 7). `false` for BestEffort writers. Matches go-DDS's
+    /// `rtpsWriter.reliable`.
+    reliable: bool,
+    /// Ring buffer of recently-sent wire messages, for retransmission.
+    /// `Some` exactly when `reliable == true`. Matches go-DDS's
+    /// `rtpsWriter.history` (`*sendHistory`, nil for BestEffort writers).
+    history: Option<SendHistory>,
+    /// Highest sequence number fully acknowledged (via ACKNACK) by at least
+    /// one remote reader. `0` means nothing has been acknowledged yet.
+    /// Matches go-DDS's `rtpsWriter.acked`. Not consulted by BestEffort
+    /// writers.
+    acked: AtomicU64,
 }
 
 // ---------------------------------------------------------------------------
@@ -215,20 +245,82 @@ impl RtpsParticipant {
         self.entity_counter.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// This participant's own RTPS message header (protocol version, vendor
+    /// ID, and `GuidPrefix` are fixed once at construction), used by every
+    /// method that sends a wire message.
+    fn header(&self) -> Header {
+        Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: self.vendor_id,
+            guid_prefix: self.guid_prefix,
+        }
+    }
+
     // ── Writer registration ─────────────────────────────────────────────
 
-    /// Registers a new local writer for `topic` and announces it via SEDP
-    /// to every known peer. Matches go-DDS's `NewPublisher`'s registration
-    /// half (entity-id assignment, `p.writers[eid] = w`,
-    /// `p.sedp.registerWriter`).
+    /// Registers a new local BestEffort writer for `topic` and announces it
+    /// via SEDP to every known peer. Matches go-DDS's `NewPublisher`'s
+    /// registration half (entity-id assignment, `p.writers[eid] = w`,
+    /// `p.sedp.registerWriter`), BestEffort case (`w.reliable == false`).
     //fusa:req REQ-RTPS-041
     pub async fn new_writer(self: &Arc<Self>, topic: impl Into<String>) -> RtpsWriter {
+        self.new_writer_impl(topic, false).await
+    }
+
+    /// Registers a new local **reliable** writer for `topic` (HEARTBEAT/
+    /// ACKNACK retransmission — sub-phase 7): same registration as
+    /// [`RtpsParticipant::new_writer`], plus a per-writer
+    /// [`SendHistory`](super::reliable::SendHistory) and a periodic
+    /// HEARTBEAT-sending `tokio::task` (matches go-DDS's
+    /// `rtpsWriter.heartbeatLoop` goroutine, driven by
+    /// [`super::reliable::HEARTBEAT_PERIOD`]). The returned `JoinHandle` is
+    /// this writer's heartbeat loop, independently stoppable via `.abort()`
+    /// — matching this module tree's established idiom (see
+    /// [`RtpsParticipant::spawn_receive_loop`]'s docs) — since, like
+    /// [`RtpsWriter`] itself, this sub-phase has no `Close` path yet to
+    /// stop it automatically (a documented deviation from go-DDS's
+    /// `rtpsWriter.Close`, which closes `hbDone`).
+    //fusa:req REQ-RTPS-050
+    pub async fn new_reliable_writer(
+        self: &Arc<Self>,
+        topic: impl Into<String>,
+    ) -> (RtpsWriter, JoinHandle<()>) {
+        let writer = self.new_writer_impl(topic, true).await;
+        let eid = writer.eid;
+        let participant = Arc::clone(self);
+        let heartbeat_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(HEARTBEAT_PERIOD);
+            // tokio::time::interval fires its first tick immediately, unlike
+            // go-DDS's time.NewTicker (which only fires after the first
+            // full period). Consume that first tick so the loop's cadence
+            // matches go-DDS's heartbeatLoop; the writer's own Write already
+            // sends an immediate HEARTBEAT on first use (see
+            // RtpsWriter::write), so nothing is lost by not sending one
+            // here too before any data exists.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                participant.send_heartbeat(eid).await;
+            }
+        });
+        (writer, heartbeat_task)
+    }
+
+    async fn new_writer_impl(
+        self: &Arc<Self>,
+        topic: impl Into<String>,
+        reliable: bool,
+    ) -> RtpsWriter {
         let topic = topic.into();
         let eid = entity_id_for_writer(self.next_entity_num());
         self.writers.write().await.insert(
             eid,
             Arc::new(WriterState {
+                topic: topic.clone(),
                 seq: AtomicU64::new(0),
+                reliable,
+                history: reliable.then(SendHistory::new),
+                acked: AtomicU64::new(0),
             }),
         );
         self.sedp.register_writer(eid, topic.clone()).await;
@@ -261,6 +353,34 @@ impl RtpsParticipant {
         topic: impl Into<String>,
         opts: SubscriberOptions,
     ) -> (SampleReceiver, RtpsReader) {
+        self.new_reader_impl(topic, opts, false).await
+    }
+
+    /// Registers a new local **reliable** reader for `topic` (HEARTBEAT/
+    /// ACKNACK gap tracking — sub-phase 7): same registration as
+    /// [`RtpsParticipant::new_reader`], plus a per-remote-writer
+    /// [`RecvTracker`](super::reliable::RecvTracker), populated lazily on
+    /// first contact with each matched writer. Unlike
+    /// [`RtpsParticipant::new_reliable_writer`], no background task is
+    /// spawned here — ACKNACK is only ever sent reactively, from within
+    /// [`RtpsParticipant::handle_data_packet`]'s DATA/HEARTBEAT handling,
+    /// matching go-DDS's `notifyReliableReaders`/`handleHeartbeat` (a
+    /// reliable reader has no periodic loop of its own in go-DDS either).
+    //fusa:req REQ-RTPS-051
+    pub async fn new_reliable_reader(
+        self: &Arc<Self>,
+        topic: impl Into<String>,
+        opts: SubscriberOptions,
+    ) -> (SampleReceiver, RtpsReader) {
+        self.new_reader_impl(topic, opts, true).await
+    }
+
+    async fn new_reader_impl(
+        self: &Arc<Self>,
+        topic: impl Into<String>,
+        opts: SubscriberOptions,
+        reliable: bool,
+    ) -> (SampleReceiver, RtpsReader) {
         let topic = topic.into();
         let eid = entity_id_for_reader(self.next_entity_num());
         let depth = opts.chan_depth(64);
@@ -269,6 +389,8 @@ impl RtpsParticipant {
             topic: topic.clone(),
             sources: RwLock::new(HashSet::new()),
             inner: Arc::clone(&inner),
+            reliable,
+            trackers: RwLock::new(HashMap::new()),
         });
         self.readers.write().await.insert(eid, Arc::clone(&state));
 
@@ -371,22 +493,26 @@ impl RtpsParticipant {
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(datagram) = rx.recv().await {
-                self.handle_data_packet(&datagram.data).await;
+                self.handle_data_packet(&datagram.data, datagram.from).await;
             }
         })
     }
 
-    /// Decodes one received datagram and dispatches every well-formed DATA
-    /// submessage in it to matched local readers. Matches go-DDS's
-    /// `handleDataPacket` (the BestEffort subset —
-    /// `notifyReliableReaders`/HEARTBEAT/ACKNACK handling is sub-phase 7).
-    /// Malformed input, non-DATA submessages, and this participant's own
+    /// Decodes one received datagram and dispatches every well-formed
+    /// submessage in it: DATA to matched local readers (plus, for reliable
+    /// readers, gap-tracking and reactive ACKNACK — sub-phase 7's
+    /// `notifyReliableReaders`), HEARTBEAT to
+    /// [`RtpsParticipant::handle_heartbeat`], and ACKNACK to
+    /// [`RtpsParticipant::handle_acknack`]. `from` is the datagram's sender
+    /// address, needed to route reliability replies back to the peer that
+    /// sent this datagram. Matches go-DDS's `handleDataPacket`. Malformed
+    /// input, unrecognised submessage IDs, and this participant's own
     /// packets (self-filtered by `GuidPrefix`, same convention as
     /// `spdp.rs`/`sedp.rs`) are silently ignored — never panics
     /// (REQ-RTPS-009).
     //fusa:req REQ-RTPS-040
     //fusa:req REQ-RTPS-009
-    async fn handle_data_packet(&self, data: &[u8]) {
+    async fn handle_data_packet(&self, data: &[u8], from: SocketAddr) {
         let Ok(header) = Header::decode(data) else {
             return;
         };
@@ -398,30 +524,285 @@ impl RtpsParticipant {
             let Ok(raw) = result else {
                 break;
             };
-            if raw.id != SUBMSG_DATA {
+            match raw.id {
+                SUBMSG_DATA => {
+                    let Ok(ds) = decode_data_submessage(raw.flags, raw.body) else {
+                        continue;
+                    };
+                    let Some(payload) = ds.payload else {
+                        continue;
+                    };
+                    let Ok(raw_payload) = unwrap_payload(&payload) else {
+                        continue;
+                    };
+                    let source = Guid {
+                        prefix: header.guid_prefix,
+                        entity: ds.writer_entity_id,
+                    };
+                    self.notify_reliable_readers(source, ds.seq_num.to_u64(), from)
+                        .await;
+                    self.dispatch_to_readers(
+                        source,
+                        None,
+                        raw_payload.to_vec(),
+                        Utc::now(),
+                        ds.seq_num.to_u64(),
+                    )
+                    .await;
+                }
+                SUBMSG_HEARTBEAT => {
+                    let Ok(hb) = decode_heartbeat_submessage(raw.body) else {
+                        continue;
+                    };
+                    let writer_guid = Guid {
+                        prefix: header.guid_prefix,
+                        entity: hb.writer_entity_id,
+                    };
+                    self.handle_heartbeat(writer_guid, hb, from).await;
+                }
+                SUBMSG_ACKNACK => {
+                    let Ok(an) = decode_acknack_submessage(raw.body) else {
+                        continue;
+                    };
+                    self.handle_acknack(an, from).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // ── Reliable QoS (sub-phase 7) ──────────────────────────────────────
+
+    /// Returns (creating on first contact) the [`RecvTracker`] `state`
+    /// tracks for `writer_guid`. Matches go-DDS's `rtpsReader.trackerFor`.
+    async fn tracker_for(state: &ReaderState, writer_guid: Guid) -> Arc<RecvTracker> {
+        {
+            let trackers = state.trackers.read().await;
+            if let Some(t) = trackers.get(&writer_guid) {
+                return Arc::clone(t);
+            }
+        }
+        let mut trackers = state.trackers.write().await;
+        Arc::clone(
+            trackers
+                .entry(writer_guid)
+                .or_insert_with(|| Arc::new(RecvTracker::new())),
+        )
+    }
+
+    /// Updates the [`RecvTracker`] of every reliable reader that accepts
+    /// `writer_guid` with the just-received sequence number `seq`, and
+    /// sends an ACKNACK back to `from` if a gap is detected. Matches
+    /// go-DDS's `notifyReliableReaders`.
+    //fusa:req REQ-RTPS-050
+    async fn notify_reliable_readers(&self, writer_guid: Guid, seq: u64, from: SocketAddr) {
+        let readers: Vec<(EntityId, Arc<ReaderState>)> = self
+            .readers
+            .read()
+            .await
+            .iter()
+            .map(|(eid, state)| (*eid, Arc::clone(state)))
+            .collect();
+
+        for (reader_eid, state) in &readers {
+            if !state.reliable || !Self::accepts_source(state, self.guid_prefix, writer_guid).await
+            {
                 continue;
             }
-            let Ok(ds) = decode_data_submessage(raw.flags, raw.body) else {
+            let tracker = Self::tracker_for(state, writer_guid).await;
+            tracker.record(seq);
+            // The writer's history reaches at least this SN, so NACK any
+            // gap below it.
+            let (base, bitmap, need_ack) = tracker.missing(seq);
+            if !need_ack {
                 continue;
-            };
-            let Some(payload) = ds.payload else {
-                continue;
-            };
-            let Ok(raw_payload) = unwrap_payload(&payload) else {
-                continue;
-            };
-            let source = Guid {
-                prefix: header.guid_prefix,
-                entity: ds.writer_entity_id,
-            };
-            self.dispatch_to_readers(
-                source,
-                None,
-                raw_payload.to_vec(),
-                Utc::now(),
-                ds.seq_num.to_u64(),
+            }
+            self.send_acknack(
+                *reader_eid,
+                writer_guid.entity,
+                base,
+                bitmap,
+                &tracker,
+                from,
             )
             .await;
+        }
+    }
+
+    /// Responds with ACKNACK if any reliable reader accepting `writer_guid`
+    /// has a gap up to `hb.last_sn`, and anchors that reader's cumulative-
+    /// ACK base at `hb.first_sn` on first contact. Matches go-DDS's
+    /// `handleHeartbeat`.
+    //fusa:req REQ-RTPS-050
+    async fn handle_heartbeat(&self, writer_guid: Guid, hb: Heartbeat, from: SocketAddr) {
+        let readers: Vec<(EntityId, Arc<ReaderState>)> = self
+            .readers
+            .read()
+            .await
+            .iter()
+            .map(|(eid, state)| (*eid, Arc::clone(state)))
+            .collect();
+
+        for (reader_eid, state) in &readers {
+            if !state.reliable || !Self::accepts_source(state, self.guid_prefix, writer_guid).await
+            {
+                continue;
+            }
+            let tracker = Self::tracker_for(state, writer_guid).await;
+            // On first contact, anchor the cumulative-ACK base at the
+            // writer's FirstSN so the reader can request the writer's
+            // whole live history.
+            tracker.init_expected(hb.first_sn.to_u64());
+            // Re-NACK every SN still missing up to the writer's LastSN.
+            // Because the watermark never skips a gap, a lost retransmit is
+            // requested again on each periodic HEARTBEAT until it arrives.
+            let (base, bitmap, need_ack) = tracker.missing(hb.last_sn.to_u64());
+            if !need_ack {
+                continue;
+            }
+            self.send_acknack(
+                *reader_eid,
+                writer_guid.entity,
+                base,
+                bitmap,
+                &tracker,
+                from,
+            )
+            .await;
+        }
+    }
+
+    /// Builds and sends one ACKNACK submessage to `to`.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_acknack(
+        &self,
+        reader_eid: EntityId,
+        writer_eid: EntityId,
+        base: u64,
+        bitmap: u32,
+        tracker: &RecvTracker,
+        to: SocketAddr,
+    ) {
+        let an = AckNack {
+            reader_entity_id: reader_eid,
+            writer_entity_id: writer_eid,
+            base: SequenceNumber::from_u64(base),
+            bitmap,
+            count: tracker.next_ack_count(),
+        };
+        let msg = wrap_in_rtps_message(self.header(), &encode_acknack_submessage(an));
+        let _ = self.data_socket.send_to(&msg, to).await;
+    }
+
+    /// Retransmits samples still in the writer's history for every
+    /// requested sequence number in `an`'s bitmap, and sends a GAP
+    /// declaring any leading portion of the request that has already been
+    /// evicted from history — so the reader can advance past samples this
+    /// writer can never provide instead of NACKing them forever. Matches
+    /// go-DDS's `handleAckNack`. `from` is the requesting reader's address
+    /// (used for the GAP, sent directly there in addition to every matched
+    /// reader locator, same as go-DDS).
+    //fusa:req REQ-RTPS-050
+    async fn handle_acknack(&self, an: AckNack, from: SocketAddr) {
+        let writer_state = {
+            let writers = self.writers.read().await;
+            writers.get(&an.writer_entity_id).cloned()
+        };
+        let Some(writer_state) = writer_state else {
+            return;
+        };
+        if !writer_state.reliable {
+            return;
+        }
+        let Some(history) = writer_state.history.as_ref() else {
+            return;
+        };
+
+        // Advance the drain watermark: ackBase is the first SN not yet
+        // confirmed.
+        let ack_base = an.base.to_u64();
+        advance_acked(&writer_state, ack_base);
+
+        let hist_first_last = history.first_last();
+
+        // Retransmit samples that are still in history.
+        for bit in 0u64..32 {
+            if an.bitmap & (1 << bit) == 0 {
+                continue;
+            }
+            let seq = ack_base + bit;
+            let Some(msg) = history.get(seq) else {
+                continue;
+            };
+            for locator in self.sedp.matched_reader_locators(&writer_state.topic).await {
+                if let Some(addr) = locator.udp_addr() {
+                    let _ = self.data_socket.send_to(&msg, addr).await;
+                }
+            }
+        }
+
+        // Send a GAP for the leading portion of the NACK range that has
+        // been evicted from history, so the reader can advance its
+        // expected-SN pointer instead of stalling forever.
+        if let Some((hist_first, _)) = hist_first_last {
+            if ack_base < hist_first {
+                let mut gap_end = hist_first - 1;
+                // Cap to the 32-bit NACK bitmap range so we don't
+                // over-declare.
+                if gap_end > ack_base + 31 {
+                    gap_end = ack_base + 31;
+                }
+                let g = Gap {
+                    reader_entity_id: an.reader_entity_id,
+                    writer_entity_id: an.writer_entity_id,
+                    gap_start: SequenceNumber::from_u64(ack_base),
+                    gap_end: SequenceNumber::from_u64(gap_end),
+                };
+                let gap_msg = wrap_in_rtps_message(self.header(), &encode_gap_submessage(g));
+                // Send directly to the requesting reader.
+                let _ = self.data_socket.send_to(&gap_msg, from).await;
+                // Also send to all matched readers so any reader on this
+                // topic can advance.
+                for locator in self.sedp.matched_reader_locators(&writer_state.topic).await {
+                    if let Some(addr) = locator.udp_addr() {
+                        let _ = self.data_socket.send_to(&gap_msg, addr).await;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Builds and sends a HEARTBEAT for writer `writer_eid` to every reader
+    /// locator SEDP has matched to its topic. A no-op if `writer_eid` is
+    /// unknown, not reliable, or has never stored a sample (nothing to
+    /// advertise yet). Matches go-DDS's `rtpsWriter.sendHeartbeatLocked`.
+    //fusa:req REQ-RTPS-050
+    async fn send_heartbeat(&self, writer_eid: EntityId) {
+        let writer_state = {
+            let writers = self.writers.read().await;
+            writers.get(&writer_eid).cloned()
+        };
+        let Some(writer_state) = writer_state else {
+            return;
+        };
+        let Some(history) = writer_state.history.as_ref() else {
+            return;
+        };
+        let Some((first, last)) = history.first_last() else {
+            return;
+        };
+        let hb = Heartbeat {
+            reader_entity_id: ENTITYID_UNKNOWN,
+            writer_entity_id: writer_eid,
+            first_sn: SequenceNumber::from_u64(first),
+            last_sn: SequenceNumber::from_u64(last),
+            count: history.next_hb_count(),
+        };
+        let msg = wrap_in_rtps_message(self.header(), &encode_heartbeat_submessage(hb));
+        for locator in self.sedp.matched_reader_locators(&writer_state.topic).await {
+            if let Some(addr) = locator.udp_addr() {
+                let _ = self.data_socket.send_to(&msg, addr).await;
+            }
         }
     }
 
@@ -503,6 +884,34 @@ impl RtpsParticipant {
     /// under `DropNewest`/unsubscribed/closed — matches go-DDS's `mDrops`.
     pub fn drops(&self) -> u64 {
         self.drops.load(Ordering::Relaxed)
+    }
+}
+
+/// Records that a remote reader has acknowledged up to (but not including)
+/// `ack_base`, advancing `state.acked` if this is higher-water than what
+/// was already recorded. `ack_base == 0` is a no-op (go-DDS's ACKNACK
+/// `Base` is 1-indexed like every other RTPS sequence number; `0` never
+/// denotes a real acknowledgement). Matches go-DDS's
+/// `rtpsWriter.advanceAcked`, minus the `drainCh` close (this sub-phase has
+/// no writer `Close`/drain path yet — see [`RtpsParticipant::new_reliable_writer`]'s
+/// docs).
+//fusa:req REQ-RTPS-050
+fn advance_acked(state: &WriterState, ack_base: u64) {
+    if ack_base == 0 {
+        return;
+    }
+    let confirmed = ack_base - 1;
+    let mut cur = state.acked.load(Ordering::Relaxed);
+    while confirmed > cur {
+        match state.acked.compare_exchange_weak(
+            cur,
+            confirmed,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => cur = actual,
+        }
     }
 }
 
@@ -590,12 +999,16 @@ impl RtpsWriter {
             SequenceNumber::from_u64(seq),
             &wrapped,
         );
-        let header = Header {
-            protocol_version: PROTOCOL_VERSION_2_3,
-            vendor_id: self.participant.vendor_id,
-            guid_prefix: self.participant.guid_prefix,
-        };
-        let msg = wrap_in_rtps_message(header, &submsg);
+        let msg = wrap_in_rtps_message(self.participant.header(), &submsg);
+
+        // Reliable QoS (sub-phase 7): retain a copy of the full wire
+        // message for retransmission before anything else, matching
+        // go-DDS's `w.history.store(w.seq, msgs[0])` — store-before-send so
+        // a retransmit request that races the send below can never observe
+        // an unstored sequence number.
+        if let Some(history) = writer_state.history.as_ref() {
+            history.store(seq, &msg);
+        }
 
         let source = Guid {
             prefix: self.participant.guid_prefix,
@@ -614,6 +1027,15 @@ impl RtpsWriter {
             if let Some(addr) = locator.udp_addr() {
                 let _ = self.participant.data_socket.send_to(&msg, addr).await;
             }
+        }
+
+        // Send HEARTBEAT immediately after each reliable write so remote
+        // readers can detect gaps without waiting for the periodic ticker
+        // (see RtpsParticipant::new_reliable_writer). Matches go-DDS's
+        // `rtpsWriter.Write` calling `sendHeartbeatLocked()` unconditionally
+        // when `w.reliable`.
+        if writer_state.reliable {
+            self.participant.send_heartbeat(self.eid).await;
         }
         Ok(())
     }
@@ -746,6 +1168,21 @@ mod tests {
         assert_eq!(r1.entity_id(), entity_id_for_reader(3));
     }
 
+    //fusa:test REQ-RTPS-051
+    #[tokio::test]
+    async fn new_reliable_reader_registers_and_delivers_like_a_besteffort_reader() {
+        let p = lone_participant(ascending_prefix()).await;
+        let (rx, reader) = p
+            .new_reliable_reader("Square", SubscriberOptions::default())
+            .await;
+        assert_eq!(reader.entity_id(), entity_id_for_reader(1));
+
+        let writer = p.new_writer("Square").await;
+        writer.write(b"hello").await.unwrap();
+        let sample = rx.try_recv().expect("expected a delivered sample");
+        assert_eq!(sample.payload, b"hello");
+    }
+
     //fusa:test REQ-RTPS-038
     #[tokio::test]
     async fn local_write_delivers_to_local_reader_on_same_topic() {
@@ -819,9 +1256,10 @@ mod tests {
     async fn handle_data_packet_ignores_own_and_malformed_input_without_panicking() {
         let p = lone_participant(ascending_prefix()).await;
         let (rx, _reader) = p.new_reader("Square", SubscriberOptions::default()).await;
+        let dummy_from: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         // Malformed: too short to even have a header.
-        p.handle_data_packet(b"short").await;
+        p.handle_data_packet(b"short", dummy_from).await;
         assert!(rx.try_recv().is_none());
 
         // Well-formed, but from this same participant's own GuidPrefix —
@@ -840,7 +1278,7 @@ mod tests {
             guid_prefix: ascending_prefix(), // == p's own prefix
         };
         let msg = wrap_in_rtps_message(header, &submsg);
-        p.handle_data_packet(&msg).await;
+        p.handle_data_packet(&msg, dummy_from).await;
         assert!(rx.try_recv().is_none());
     }
 
@@ -1001,6 +1439,143 @@ mod tests {
         }
         .to_bytes();
         assert_eq!(sample.writer_guid, expected_writer_guid);
+    }
+
+    // ── Reliable QoS: gap detection + ACKNACK retransmission over real UDP ─
+    //
+    // Two independent real RtpsParticipants (A, B), same SPDP/SEDP-matched
+    // setup as the BestEffort round trip above, but A registers a
+    // *reliable* writer and B a *reliable* reader. Unlike the BestEffort
+    // test, B's data-socket receive loop is driven manually by this test
+    // (instead of RtpsParticipant::spawn_receive_loop) so it can simulate
+    // exactly one lost DATA datagram (sequence number 2, dropped the first
+    // time it is observed — a real retransmission of the same sequence
+    // number is forwarded normally) without touching any private state:
+    // every other step — real encode/decode, real SEDP-resolved UDP sends,
+    // real gap tracking, real ACKNACK, real history-backed retransmission —
+    // is the actual production code path.
+
+    //fusa:test REQ-RTPS-046
+    //fusa:test REQ-RTPS-047
+    //fusa:test REQ-RTPS-050
+    #[tokio::test]
+    async fn reliable_qos_detects_gap_and_retransmits_over_real_udp() {
+        let prefix_a = ascending_prefix();
+        let prefix_b = other_prefix();
+
+        // A: reuse the standard peer helper (its own data-receive loop is
+        // needed so A's participant can process B's ACKNACK and retransmit).
+        let a = spawn_peer(prefix_a).await;
+
+        // B: same building blocks as spawn_peer, but the data socket's
+        // receive channel is kept in this test's hands rather than handed
+        // to RtpsParticipant::spawn_receive_loop.
+        let meta_socket_b = Arc::new(RtpsSocket::bind_unicast_v4(0).await.unwrap());
+        let data_socket_b = Arc::new(RtpsSocket::bind_unicast_v4(0).await.unwrap());
+        let meta_port_b = meta_socket_b.local_port();
+        let data_port_b = data_socket_b.local_port();
+        let spdp_b = SpdpService::new(
+            SpdpConfig::new(0, prefix_b, meta_port_b, data_port_b),
+            Arc::clone(&meta_socket_b),
+        );
+        let sedp_b = SedpService::new(
+            super::super::sedp::SedpConfig::new(prefix_b, data_port_b),
+            Arc::clone(&meta_socket_b),
+            Arc::clone(&spdp_b),
+        );
+        let (meta_rx_b, _meta_recv_handle_b) = meta_socket_b.spawn_receive_loop(64);
+        let _sedp_recv_b = Arc::clone(&sedp_b).spawn_receive_loop(meta_rx_b);
+        let participant_b = RtpsParticipant::new(
+            prefix_b,
+            VENDOR_ID_RUST_DDS,
+            Arc::clone(&data_socket_b),
+            Arc::clone(&sedp_b),
+        );
+        let _match_listener_b = participant_b.clone().spawn_sedp_match_listener().await;
+        let (mut data_rx_b, _data_recv_handle_b) = data_socket_b.spawn_receive_loop(64);
+
+        let (rx_b, _reader_b) = participant_b
+            .new_reliable_reader("Square", SubscriberOptions::default())
+            .await;
+        let (writer_a, _hb_task_a) = a.participant.new_reliable_writer("Square").await;
+
+        let proxy_b = proxy_from(&spdp_b, prefix_b, meta_port_b);
+        let proxy_a = proxy_from(&a.spdp, prefix_a, a.spdp.config().meta_unicast_port);
+        a.participant.sedp.on_new_peer(&proxy_b).await;
+        participant_b.sedp.on_new_peer(&proxy_a).await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !a
+                    .participant
+                    .sedp
+                    .matched_reader_locators("Square")
+                    .await
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("SEDP endpoint match never landed on participant a");
+
+        // Drive B's data socket manually: drop the first DATA submessage
+        // carrying sequence number 2 (simulating one lost datagram); every
+        // other datagram — including the later retransmission of the same
+        // sequence number — is forwarded to the real handle_data_packet
+        // path.
+        let participant_b_task = Arc::clone(&participant_b);
+        let drain_task = tokio::spawn(async move {
+            let mut dropped_seq2_once = false;
+            while let Some(datagram) = data_rx_b.recv().await {
+                let mut drop_this = false;
+                if let Ok(header) = Header::decode(&datagram.data) {
+                    let body = &datagram.data[Header::LEN..];
+                    for result in SubmessageIter::new(body) {
+                        let Ok(raw) = result else { break };
+                        if raw.id == SUBMSG_DATA {
+                            if let Ok(ds) = decode_data_submessage(raw.flags, raw.body) {
+                                if ds.seq_num.to_u64() == 2 && !dropped_seq2_once {
+                                    drop_this = true;
+                                }
+                            }
+                        }
+                    }
+                    let _ = header; // header already decoded above for iteration
+                }
+                if drop_this {
+                    dropped_seq2_once = true;
+                    continue; // simulate loss
+                }
+                participant_b_task
+                    .handle_data_packet(&datagram.data, datagram.from)
+                    .await;
+            }
+        });
+
+        writer_a.write(b"one").await.unwrap();
+        writer_a.write(b"two").await.unwrap();
+        writer_a.write(b"three").await.unwrap();
+
+        let mut received: HashSet<Vec<u8>> = HashSet::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(sample) = rx_b.recv().await {
+                received.insert(sample.payload);
+                if received.len() == 3 {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("did not receive all 3 samples (including the gap-recovered one) in time");
+
+        assert!(received.contains(b"one".as_slice()));
+        assert!(received.contains(b"two".as_slice())); // recovered via ACKNACK retransmission
+        assert!(received.contains(b"three".as_slice()));
+
+        drain_task.abort();
     }
 
     // ── SPDP → SEDP bridge (spawn_spdp_peer_listener) over real multicast ──

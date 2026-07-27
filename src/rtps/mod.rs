@@ -22,8 +22,15 @@
 //! `rtpsReader`/`rtpsWriter`-shaped local endpoint bookkeeping, wires
 //! `sedp`'s endpoint-matching output into it, and performs real BestEffort
 //! DATA submessage encode/decode/dispatch over `transport`'s sockets — real
-//! end-to-end sample delivery, not just discovery. Later sub-phases follow
-//! the same layering. This module tree is internal: it is **not**
+//! end-to-end sample delivery, not just discovery. `reliable` (sub-phase 7,
+//! "Reliable QoS") adds HEARTBEAT/ACKNACK retransmission on top of
+//! `participant`'s BestEffort path: a per-writer send-history ring buffer
+//! and per-remote-writer receive-side gap tracker (both pure bookkeeping,
+//! no I/O), while `message` gains the HEARTBEAT/ACKNACK/GAP submessage wire
+//! codec and `participant` gains the heartbeat-send/acknack-handle/
+//! retransmit wiring — mirroring go-DDS's own split across `reliable.go`,
+//! `message.go`, and `participant.go`. Later sub-phases follow the same
+//! layering. This module tree is internal: it is **not**
 //! re-exported from the crate root and is **not** wired into the public
 //! `Participant`/`Publisher`/`Subscriber` API yet.
 //!
@@ -45,6 +52,7 @@ pub mod guid;
 pub mod locator;
 pub mod message;
 pub mod participant;
+pub mod reliable;
 pub mod sedp;
 pub mod spdp;
 pub mod transport;

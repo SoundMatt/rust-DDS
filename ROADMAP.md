@@ -267,6 +267,42 @@ Sub-phases, scoped against the go-DDS file breakdown:
    history cache (go-DDS retains 256 samples per writer), gap detection on
    the reader side. Mirrors `reliable.go` (231 LOC) plus the
    heartbeat/acknack handlers in `participant.go`.
+   **Done** — landed in [rust-DDS#28](https://github.com/SoundMatt/rust-DDS/pull/28)
+   as `src/rtps/reliable.rs` (the sender-side `SendHistory` ring buffer,
+   retaining the last 256 sent wire messages per reliable writer, and the
+   receiver-side `RecvTracker` contiguous-watermark gap tracker, bounded
+   out-of-order buffering capped at 8192 SNs ahead of the watermark — direct
+   ports of go-DDS's `sendHistory`/`recvTracker`), extends `src/rtps/message.rs`
+   with the HEARTBEAT/ACKNACK/GAP submessage wire codec (mirroring go-DDS's
+   own file layout — those codecs live in `message.go`, not `reliable.go`),
+   and extends `src/rtps/participant.rs` with `RtpsParticipant::new_reliable_writer`/
+   `new_reliable_reader` plus the heartbeat-send/acknack-handle/retransmit
+   wiring (`send_heartbeat`, `notify_reliable_readers`, `handle_heartbeat`,
+   `handle_acknack`, `advance_acked`) — matching go-DDS's
+   `rtpsWriter.sendHeartbeatLocked`/`heartbeatLoop`/`notifyReliableReaders`/
+   `handleHeartbeat`/`handleAckNack`/`advanceAcked` behaviourally. A reliable
+   writer's periodic HEARTBEAT loop is its own `tokio::task`
+   (`tokio::time::interval`-driven, 200ms period matching go-DDS's
+   `heartbeatPeriod`), independently stoppable via `.abort()` on the
+   `JoinHandle` `new_reliable_writer` returns alongside the writer handle —
+   this sub-phase has no writer `Close` path yet to stop it automatically
+   (a documented deviation from go-DDS's `rtpsWriter.Close`/`hbDone`, same
+   category as sub-phase 6's "no Close path for writers yet" note); for the
+   same reason, `waitDrain`/`CloseWithDrain` are not ported (nothing to
+   drain into). GAP is encode-only, matching go-DDS's own behavior exactly
+   (go-DDS sends GAP but never parses one back on receipt either — no
+   `parseGAP`/`submsgGAP` case exists in its own `handleDataPacket` switch).
+   Verified byte-for-byte against real go-DDS reference output for the
+   HEARTBEAT/ACKNACK/GAP submessage codec (`REQ-RTPS-043`..`045`), plus a
+   real two-participant round trip over loopback UDP exercising actual gap
+   detection and ACKNACK-driven retransmission end-to-end — one DATA
+   datagram is deliberately dropped mid-stream and recovered purely through
+   the wire protocol, not local bookkeeping (`REQ-RTPS-046`..`051`). Zero
+   `unsafe` (REQ-ASIL-002/REQ-MEM-001). Internal only — not yet wired into
+   `Participant`/`Publisher`/`Subscriber`. Not in scope here (later Tier 1
+   work, per the roadmap's own scoping): `DATA_FRAG` fragmentation
+   (sub-phase 8) and TransientLocal/wildcard-topic matching (sub-phase 9's
+   stretch items).
 8. **Fragmentation** — `DATA_FRAG` for payloads exceeding one UDP
    datagram. Mirrors `fragment.go` (231 LOC).
 9. **Small supporting pieces, scoped as stretch items within Tier 1
@@ -469,7 +505,7 @@ harder to change.
 
 ### Planned — v0.3 — Reliable QoS (Tier 1)
 
-- [ ] Reliable delivery with HEARTBEAT / ACKNACK retransmission
+- [x] Reliable delivery with HEARTBEAT / ACKNACK retransmission
 - [ ] TransientLocal durability over RTPS (SEDP history cache)
 - [ ] Fragment support for large payloads (DATA_FRAG)
 - [ ] Deadline QoS subscriber enforcement with callback
