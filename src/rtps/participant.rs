@@ -15,11 +15,13 @@
 //! LOC total) — specifically `handleDataPacket`, `dispatchToReaders`,
 //! `deliverToReader`, `NewPublisher`/`NewSubscriber`'s registration
 //! bookkeeping, and the BestEffort (non-`w.reliable`) half of
-//! `rtpsWriter.Write`. **Not** ported here (explicitly out of scope for
-//! this sub-phase, per `ROADMAP.md`): HEARTBEAT/ACKNACK reliable-QoS
-//! retransmission (`notifyReliableReaders`/`handleHeartbeat`/
-//! `handleAckNack`, `reliable.go` — that's sub-phase 7), `DATA_FRAG`
-//! fragmentation (sub-phase 8), and the small stretch items in sub-phase 9
+//! `rtpsWriter.Write`. Sub-phase 7 (Reliable QoS) later extended this same
+//! module with HEARTBEAT/ACKNACK retransmission wiring (see the "Reliable
+//! QoS (sub-phase 7)" section below), and sub-phase 8 (Fragmentation) with
+//! DATA_FRAG send/receive wiring on top of [`super::fragment`] — see
+//! [`RtpsWriter::write`] and the `SUBMSG_DATA_FRAG` case in
+//! [`RtpsParticipant::handle_data_packet`]. **Not** ported here (out of
+//! scope, per `ROADMAP.md`): the small stretch items in sub-phase 9
 //! (TransientLocal persistence, topic wildcard matching).
 //!
 //! # Wiring SEDP's match output
@@ -118,6 +120,10 @@ use crate::relay::SubscriberOptions;
 use crate::types::Sample;
 
 use super::cdr::{unwrap_payload, wrap_payload};
+use super::fragment::{
+    decode_data_frag, encode_data_frag, split_into_fragments, FragmentAssembler,
+    MAX_FRAGMENT_PAYLOAD, SUBMSG_DATA_FRAG,
+};
 use super::guid::{
     entity_id_for_reader, entity_id_for_writer, EntityId, Guid, GuidPrefix, ENTITYID_UNKNOWN,
 };
@@ -204,6 +210,11 @@ pub struct RtpsParticipant {
     entity_counter: AtomicU32,
     readers: RwLock<HashMap<EntityId, Arc<ReaderState>>>,
     writers: RwLock<HashMap<EntityId, Arc<WriterState>>>,
+    /// Receive-side DATA_FRAG reassembly buffer, shared across every reader
+    /// on this participant — see `fragment.rs`'s module docs ("Receive-side
+    /// wiring") for why a single participant-wide instance mirrors go-DDS's
+    /// own (unwired) `fragmentAssembler` design, caveats included.
+    frag_assembler: FragmentAssembler,
     delivers: AtomicU64,
     drops: AtomicU64,
 }
@@ -231,6 +242,7 @@ impl RtpsParticipant {
             entity_counter: AtomicU32::new(0),
             readers: RwLock::new(HashMap::new()),
             writers: RwLock::new(HashMap::new()),
+            frag_assembler: FragmentAssembler::new(),
             delivers: AtomicU64::new(0),
             drops: AtomicU64::new(0),
         })
@@ -502,15 +514,21 @@ impl RtpsParticipant {
     /// submessage in it: DATA to matched local readers (plus, for reliable
     /// readers, gap-tracking and reactive ACKNACK — sub-phase 7's
     /// `notifyReliableReaders`), HEARTBEAT to
-    /// [`RtpsParticipant::handle_heartbeat`], and ACKNACK to
-    /// [`RtpsParticipant::handle_acknack`]. `from` is the datagram's sender
-    /// address, needed to route reliability replies back to the peer that
-    /// sent this datagram. Matches go-DDS's `handleDataPacket`. Malformed
-    /// input, unrecognised submessage IDs, and this participant's own
-    /// packets (self-filtered by `GuidPrefix`, same convention as
-    /// `spdp.rs`/`sedp.rs`) are silently ignored — never panics
-    /// (REQ-RTPS-009).
+    /// [`RtpsParticipant::handle_heartbeat`], ACKNACK to
+    /// [`RtpsParticipant::handle_acknack`], and DATA_FRAG to this
+    /// participant's [`super::fragment::FragmentAssembler`] — once a
+    /// fragmented sample fully reassembles, it is dispatched exactly like a
+    /// completed DATA submessage (unwrap payload, gap-track/ACKNACK,
+    /// deliver). `from` is the datagram's sender address, needed to route
+    /// reliability replies back to the peer that sent this datagram.
+    /// Matches go-DDS's `handleDataPacket`, plus the DATA_FRAG case go-DDS
+    /// itself never wires in — see `fragment.rs`'s module docs
+    /// ("Receive-side wiring"). Malformed input, unrecognised submessage
+    /// IDs, and this participant's own packets (self-filtered by
+    /// `GuidPrefix`, same convention as `spdp.rs`/`sedp.rs`) are silently
+    /// ignored — never panics (REQ-RTPS-009).
     //fusa:req REQ-RTPS-040
+    //fusa:req REQ-RTPS-055
     //fusa:req REQ-RTPS-009
     async fn handle_data_packet(&self, data: &[u8], from: SocketAddr) {
         let Ok(header) = Header::decode(data) else {
@@ -549,6 +567,25 @@ impl RtpsParticipant {
                         ds.seq_num.to_u64(),
                     )
                     .await;
+                }
+                SUBMSG_DATA_FRAG => {
+                    let Ok(frag) = decode_data_frag(raw.body) else {
+                        continue;
+                    };
+                    let Some(reassembled) = self.frag_assembler.receive(&frag) else {
+                        continue;
+                    };
+                    let Ok(raw_payload) = unwrap_payload(&reassembled) else {
+                        continue;
+                    };
+                    let source = Guid {
+                        prefix: header.guid_prefix,
+                        entity: frag.writer_entity_id,
+                    };
+                    let seq = frag.writer_seq_num.to_u64();
+                    self.notify_reliable_readers(source, seq, from).await;
+                    self.dispatch_to_readers(source, None, raw_payload.to_vec(), Utc::now(), seq)
+                        .await;
                 }
                 SUBMSG_HEARTBEAT => {
                     let Ok(hb) = decode_heartbeat_submessage(raw.body) else {
@@ -941,10 +978,13 @@ impl RtpsWriter {
     /// Encodes `payload` as a BestEffort DATA submessage (`CDR_LE`
     /// encapsulation, no inline QoS, no `INFO_TS` — see the module docs'
     /// "DATA submessage payload" section for the latter's deliberate
-    /// deviation from go-DDS), delivers it immediately to any local
-    /// (same-process) readers on this writer's topic, then sends the wire
-    /// message to every remote reader SEDP has matched to this topic.
-    /// Matches go-DDS's `rtpsWriter.Write`'s BestEffort path
+    /// deviation from go-DDS) — or, when the CDR-wrapped payload exceeds
+    /// [`super::fragment::MAX_FRAGMENT_PAYLOAD`], as a sequence of
+    /// DATA_FRAG submessages instead (sub-phase 8, see
+    /// [`super::fragment::split_into_fragments`]) — delivers it immediately
+    /// to any local (same-process) readers on this writer's topic, then
+    /// sends the wire message(s) to every remote reader SEDP has matched to
+    /// this topic. Matches go-DDS's `rtpsWriter.Write`'s BestEffort path
     /// (`w.reliable == false`): no history store, no HEARTBEAT.
     ///
     /// Reference bytes reproduced from go-DDS's actual `rtps` package
@@ -978,6 +1018,7 @@ impl RtpsWriter {
     /// Full run: `go test ./rtps/... -run TestZZReproParticipantDataBytes -v`
     /// (go-DDS commit 9d81543 / rust-DDS branch feat/rtps-besteffort-data).
     //fusa:req REQ-RTPS-037
+    //fusa:req REQ-RTPS-055
     pub async fn write(&self, payload: &[u8]) -> std::io::Result<()> {
         let writer_state = {
             let writers = self.participant.writers.read().await;
@@ -993,21 +1034,43 @@ impl RtpsWriter {
         let seq = writer_state.seq.fetch_add(1, Ordering::Relaxed) + 1;
 
         let wrapped = wrap_payload(payload);
-        let submsg = encode_data_submessage(
-            self.eid,
-            ENTITYID_UNKNOWN,
-            SequenceNumber::from_u64(seq),
-            &wrapped,
-        );
-        let msg = wrap_in_rtps_message(self.participant.header(), &submsg);
+
+        // Fragmentation (sub-phase 8): a CDR-wrapped payload larger than
+        // MAX_FRAGMENT_PAYLOAD is split into DATA_FRAG submessages — one
+        // full RTPS wire message per fragment — instead of a single DATA
+        // submessage. Matches go-DDS's `rtpsWriter.Write` (`len(wrapped) >
+        // fragSize`); rust-DDS has no TSN writer class yet, so every writer
+        // uses the same default fragment size go-DDS falls back to (see
+        // `fragment.rs`'s module docs).
+        let msgs: Vec<Vec<u8>> = if wrapped.len() > MAX_FRAGMENT_PAYLOAD {
+            split_into_fragments(self.eid, SequenceNumber::from_u64(seq), &wrapped)
+                .iter()
+                .map(|frag| {
+                    wrap_in_rtps_message(self.participant.header(), &encode_data_frag(frag))
+                })
+                .collect()
+        } else {
+            let submsg = encode_data_submessage(
+                self.eid,
+                ENTITYID_UNKNOWN,
+                SequenceNumber::from_u64(seq),
+                &wrapped,
+            );
+            vec![wrap_in_rtps_message(self.participant.header(), &submsg)]
+        };
 
         // Reliable QoS (sub-phase 7): retain a copy of the full wire
         // message for retransmission before anything else, matching
         // go-DDS's `w.history.store(w.seq, msgs[0])` — store-before-send so
         // a retransmit request that races the send below can never observe
-        // an unstored sequence number.
+        // an unstored sequence number. For a fragmented payload this stores
+        // only the first fragment's wire message, matching go-DDS's own
+        // documented limitation (`participant.go`'s `Write`: "a future
+        // enhancement can store per-fragment msgs").
         if let Some(history) = writer_state.history.as_ref() {
-            history.store(seq, &msg);
+            if let Some(first) = msgs.first() {
+                history.store(seq, first);
+            }
         }
 
         let source = Guid {
@@ -1025,7 +1088,9 @@ impl RtpsWriter {
             .await
         {
             if let Some(addr) = locator.udp_addr() {
-                let _ = self.participant.data_socket.send_to(&msg, addr).await;
+                for msg in &msgs {
+                    let _ = self.participant.data_socket.send_to(msg, addr).await;
+                }
             }
         }
 
@@ -1439,6 +1504,75 @@ mod tests {
         }
         .to_bytes();
         assert_eq!(sample.writer_guid, expected_writer_guid);
+    }
+
+    // ── Fragmentation: large-payload round trip over real UDP ──────────────
+
+    //fusa:test REQ-RTPS-055
+    //fusa:test REQ-RTPS-038
+    #[tokio::test]
+    async fn fragmented_payload_round_trips_over_real_udp() {
+        let prefix_a = ascending_prefix();
+        let prefix_b = other_prefix();
+
+        let a = spawn_peer(prefix_a).await;
+        let b = spawn_peer(prefix_b).await;
+
+        let (rx_b, _reader_b) = b
+            .participant
+            .new_reader("Square", SubscriberOptions::default())
+            .await;
+        let writer_a = a.participant.new_writer("Square").await;
+
+        let proxy_b = proxy_from(&b.spdp, prefix_b, b.spdp.config().meta_unicast_port);
+        let proxy_a = proxy_from(&a.spdp, prefix_a, a.spdp.config().meta_unicast_port);
+        a.participant.sedp.on_new_peer(&proxy_b).await;
+        b.participant.sedp.on_new_peer(&proxy_a).await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !a
+                    .participant
+                    .sedp
+                    .matched_reader_locators("Square")
+                    .await
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("SEDP endpoint match never landed on participant a");
+
+        // Larger than MAX_FRAGMENT_PAYLOAD once CDR-wrapped, so writer_a's
+        // write() takes the DATA_FRAG path (several UDP datagrams) instead
+        // of a single DATA submessage; b's participant must reassemble them
+        // via its FragmentAssembler and dispatch exactly one Sample, same
+        // as a single-datagram write would.
+        let payload: Vec<u8> = (0..(MAX_FRAGMENT_PAYLOAD * 3 + 77))
+            .map(|i| (i % 256) as u8)
+            .collect();
+        writer_a.write(&payload).await.unwrap();
+
+        let sample = tokio::time::timeout(std::time::Duration::from_secs(5), rx_b.recv())
+            .await
+            .expect("no reassembled sample received in time")
+            .expect("channel closed unexpectedly");
+        assert_eq!(sample.topic, "Square");
+        assert_eq!(sample.payload, payload);
+        assert_eq!(sample.sequence_number, 1);
+        let expected_writer_guid = Guid {
+            prefix: prefix_a,
+            entity: writer_a.entity_id(),
+        }
+        .to_bytes();
+        assert_eq!(sample.writer_guid, expected_writer_guid);
+
+        // Nothing further arrives: exactly one reassembled Sample per
+        // write(), not one per fragment.
+        assert!(rx_b.try_recv().is_none());
     }
 
     // ── Reliable QoS: gap detection + ACKNACK retransmission over real UDP ─

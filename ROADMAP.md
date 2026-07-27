@@ -305,6 +305,49 @@ Sub-phases, scoped against the go-DDS file breakdown:
    stretch items).
 8. **Fragmentation** — `DATA_FRAG` for payloads exceeding one UDP
    datagram. Mirrors `fragment.go` (231 LOC).
+   **Done** — landed in [rust-DDS#29](https://github.com/SoundMatt/rust-DDS/pull/29)
+   as `src/rtps/fragment.rs`: the DATA_FRAG submessage wire codec
+   (`DataFrag`/`encode_data_frag`/`decode_data_frag`, including go-DDS's own
+   file-local `submsgDATAFRAG` constant, matching `fragment.go`'s layout
+   rather than `message.go`'s), the sender-side splitter
+   (`split_into_fragments`/`split_into_fragments_n`, direct ports of
+   go-DDS's `splitIntoFragments`/`splitIntoFragmentsN`), and the
+   receiver-side reassembly buffer (`FragmentAssembler`, a direct port of
+   go-DDS's `fragmentAssembler` — stale-reassembly eviction, out-of-order
+   tolerance, and the oversize-`DataSize` rejection guard all included).
+   `src/rtps/participant.rs` extends `RtpsWriter::write` to fragment a
+   CDR-wrapped payload larger than `MAX_FRAGMENT_PAYLOAD` into DATA_FRAG
+   submessages instead of one DATA submessage (matching go-DDS's
+   `rtpsWriter.Write`, including reliable writers storing only the first
+   fragment's wire message for retransmission — go-DDS's own documented
+   simplification, not new here), and adds a `SUBMSG_DATA_FRAG` case to
+   `RtpsParticipant::handle_data_packet` that feeds a participant-owned
+   `FragmentAssembler` and dispatches a completed reassembly exactly like a
+   DATA submessage. The receive-side wiring is a deliberate addition beyond
+   go-DDS: go-DDS defines and unit-tests `fragmentAssembler` but never
+   calls it from `handleDataPacket` (no `submsgDATAFRAG` case exists there
+   either — the same encode-only asymmetry sub-phase 7 already documented
+   for GAP), so this sub-phase completes the round trip on the rust-DDS
+   side using go-DDS's own (unwired) type as the byte/behavior template —
+   see `fragment.rs`'s module docs ("Receive-side wiring") for the
+   consequent caveat (its `FragKey` is scoped by writer `EntityId` +
+   low-32-bits sequence number, matching go-DDS's own `fragKey` exactly,
+   not by full remote `Guid`). Also documents and guards one no-panic edge
+   case go-DDS's own (never-exercised) slicing logic does not: a DATA_FRAG
+   whose declared fragment layout would slice past a too-short `Payload`
+   (which would panic in Go too, just never reached since go-DDS never
+   wires this receive path in) is skipped instead, and all
+   attacker-controlled-field arithmetic uses wrapping (not panicking)
+   operations, preserving REQ-RTPS-009. Verified byte-for-byte against real
+   go-DDS reference output for the DATA_FRAG submessage codec and the
+   splitter/assembler's exact fragment boundaries (`REQ-RTPS-052`..`054`),
+   plus a real two-participant fragmented-payload round trip over loopback
+   UDP — one `write()` call whose CDR-wrapped payload spans several
+   DATA_FRAG datagrams, reassembled into exactly one delivered `Sample`
+   (`REQ-RTPS-055`). Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001). Internal
+   only — not yet wired into `Participant`/`Publisher`/`Subscriber`. Not in
+   scope here (later Tier 1 work, per the roadmap's own scoping):
+   TransientLocal/wildcard-topic matching (sub-phase 9's stretch items).
 9. **Small supporting pieces, scoped as stretch items within Tier 1
    rather than deferred**: TransientLocal durability persistence hooks
    (`persist.go`, 87 LOC), topic wildcard matching (`wildcard.go`,
@@ -507,7 +550,7 @@ harder to change.
 
 - [x] Reliable delivery with HEARTBEAT / ACKNACK retransmission
 - [ ] TransientLocal durability over RTPS (SEDP history cache)
-- [ ] Fragment support for large payloads (DATA_FRAG)
+- [x] Fragment support for large payloads (DATA_FRAG)
 - [ ] Deadline QoS subscriber enforcement with callback
 
 ### Planned — v0.4 — Shared-Memory Transport

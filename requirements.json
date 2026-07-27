@@ -1257,6 +1257,34 @@
       "text": "The system shall register a new local reliable reader the same way as a BestEffort reader (entity-id assignment, SEDP registration, matched-source pre-population) plus a lazily-populated per-remote-writer gap-tracker table, matching go-DDS's NewSubscriber registration for a reliable rtpsReader.",
       "category": "functional",
       "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-052",
+      "title": "DATA_FRAG submessage codec",
+      "text": "The system shall encode and decode a DATA_FRAG submessage (extraFlags, octetsToInlineQos, reader/writer EntityId, writer SequenceNumber, fragmentStartingNum, fragmentsInSubmsg, fragmentSize, dataSize, and fragment payload bytes) byte-for-byte matching go-DDS's marshalDataFrag/parseDataFrag, and shall never panic on truncated or malformed input.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-053",
+      "title": "DATA_FRAG reassembly",
+      "text": "The system shall reassemble DATA_FRAG submessages for a given writer and sequence number into the original payload once every fragment has arrived, tolerating out-of-order and duplicate fragment delivery; shall reject a claimed DataSize above a fixed cap before allocating any reassembly buffer; shall evict an incomplete reassembly older than a fixed staleness age; and shall never panic on a fragment whose declared layout is inconsistent with its carried payload length, matching go-DDS's fragmentAssembler behaviourally while adding this no-panic guard for a live (untrusted-input) receive path.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-054",
+      "title": "Sender-side fragment splitting",
+      "text": "The system shall split a payload larger than a configured per-fragment size into a sequence of DATA_FRAG fragments, each carrying a 1-based FragmentStartingNum, a single fragment per submessage, and the total unfragmented DataSize, matching go-DDS's splitIntoFragments/splitIntoFragmentsN byte-for-byte, including falling back to the default fragment size when given a zero size.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-055",
+      "title": "Writer/participant fragmentation wiring",
+      "text": "The system shall, for a writer whose CDR-wrapped payload exceeds the default per-fragment size, send DATA_FRAG submessages instead of a single DATA submessage, matching go-DDS's rtpsWriter.Write; and shall, on receipt of a DATA_FRAG submessage, feed it to a per-participant fragment reassembly buffer and dispatch the completed reassembly to matched local readers exactly like a completed DATA submessage, including reliable-reader gap tracking and reactive ACKNACK.",
+      "category": "functional",
+      "criticality": "high"
     }
   ]
 }
