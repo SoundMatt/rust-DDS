@@ -3,14 +3,16 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-//! RTPS (Real-Time Publish-Subscribe Protocol) wire types — RTPS 2.3.
-//!
-//! This is Tier 1 sub-phase 1 of the parity build-out plan in `ROADMAP.md`
-//! ("Tier 1 — RTPS wire-protocol port" → "Wire framing & identifiers"):
-//! pure, synchronous `encode`/`decode` for the foundational wire types only.
-//! No I/O, no async, no participant/discovery/transport logic — that is
-//! later sub-phases. This module tree is internal: it is **not** re-exported
-//! from the crate root and is **not** wired into the public
+//! RTPS (Real-Time Publish-Subscribe Protocol) wire types and transport —
+//! RTPS 2.3. Tracks the parity build-out plan in `ROADMAP.md` ("Tier 1 —
+//! RTPS wire-protocol port"): `guid`/`locator`/`message` (sub-phase 1,
+//! "Wire framing & identifiers") and `cdr` (sub-phase 2, "Minimal
+//! wire-level CDR") are pure, synchronous `encode`/`decode` for wire types,
+//! no I/O. `transport` (sub-phase 3, "UDP transport") is the first module
+//! in this tree with actual I/O — async on tokio, per `transport`'s own
+//! module docs. No participant/discovery dispatch logic yet — that is later
+//! sub-phases. This module tree is internal: it is **not** re-exported from
+//! the crate root and is **not** wired into the public
 //! `Participant`/`Publisher`/`Subscriber` API yet.
 //!
 //! Byte layout for every type here is derived from go-DDS's `rtps` package
@@ -30,6 +32,7 @@ pub mod cdr;
 pub mod guid;
 pub mod locator;
 pub mod message;
+pub mod transport;
 
 use thiserror::Error;
 
