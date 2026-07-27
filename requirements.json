@@ -1005,6 +1005,41 @@
       "text": "The system shall prepend a 4-byte CDR_LE encapsulation header (scheme + zero options) to a raw payload, and shall strip a 4-byte encapsulation header accepting either the CDR_LE or PL_CDR_LE scheme, matching go-DDS's rtps.cdrWrapPayload/cdrUnwrapPayload byte-for-byte.",
       "category": "functional",
       "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-016",
+      "title": "RTPS 2.3 §9.6.1 port-assignment formula",
+      "text": "The system shall compute the SPDP metatraffic multicast port as 7400 + 250*domain, the metatraffic unicast port as 7400 + 250*domain + 10 + 2*participant_idx, and the user-data unicast port as 7400 + 250*domain + 11 + 2*participant_idx, matching go-DDS's rtps.metaMulticastPort/metaUnicastPort/userUnicastPort exactly.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-017",
+      "title": "SPDP discovery multicast group addresses",
+      "text": "The system shall use 239.255.0.1 as the IPv4 SPDP discovery multicast group and FF03::1 as the IPv6 SPDP discovery multicast group, matching go-DDS's rtps.spdpMulticastAddr/spdpMulticastAddrV6.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-018",
+      "title": "UDP unicast socket bind with sequential port retry",
+      "text": "The system shall bind an async UDP unicast socket (IPv4 on 0.0.0.0, IPv6 on [::], with IPv6 explicitly noted as having limited interop testing) on a requested port, and on bind failure shall retry sequentially on up to 16 subsequent ports before returning an error, matching go-DDS's rtps.newUnicastSocket/newUnicastSocketV6 retry behaviour.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-019",
+      "title": "Multicast receive socket with SO_REUSEADDR/SO_REUSEPORT",
+      "text": "The system shall bind a UDP multicast receive socket with SO_REUSEADDR set (and SO_REUSEPORT where the platform supports it) so multiple local participants can share the same SPDP multicast port, and shall join the requested multicast group, using only the socket2 crate's safe API with no raw libc calls and no unsafe code (REQ-ASIL-002/REQ-MEM-001), matching go-DDS's net.ListenMulticastUDP sharing semantics.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-020",
+      "title": "Per-socket async receive loop dispatching via mpsc channel",
+      "text": "The system shall spawn one tokio::task per UDP socket that loops UdpSocket::recv_from and pushes each received datagram (payload plus sender address) into an internal bounded mpsc channel, dropping the datagram if the channel is full and exiting the loop if the channel's receiver has been dropped, replacing go-DDS's single dataReceiveLoop goroutine that multiplexes all sockets.",
+      "category": "functional",
+      "criticality": "high"
     }
   ]
 }

@@ -153,6 +153,20 @@ Sub-phases, scoped against the go-DDS file breakdown:
    claim more confidence than that either). OS-specific socket options
    (`SO_REUSEPORT`, TX timestamping) go through the `socket2` crate's safe
    API rather than raw libc calls — see the no-`unsafe` note below.
+   **Done** — landed in [rust-DDS#24](https://github.com/SoundMatt/rust-DDS/pull/24)
+   as `src/rtps/transport.rs`: async (tokio) `RtpsSocket` with
+   `bind_unicast_v4`/`_v6` (16-port sequential retry, matching go-DDS's
+   `newUnicastSocket`/`newUnicastSocketV6`) and `bind_multicast_v4`/`_v6`
+   (SO_REUSEADDR/SO_REUSEPORT via `socket2`'s safe API, so multiple local
+   participants can share the SPDP multicast port), plus
+   `spawn_receive_loop` — one `tokio::task` per socket running
+   `recv_from` in a loop and dispatching into an `mpsc` channel, replacing
+   go-DDS's single `dataReceiveLoop` goroutine. Port-formula functions and
+   the `239.255.0.1`/`FF03::1` multicast constants verified against real
+   go-DDS reference values (`REQ-RTPS-016`..`020`). Zero `unsafe`
+   (REQ-ASIL-002/REQ-MEM-001). Internal only — not yet wired into
+   `Participant`/`Publisher`/`Subscriber`; consumed by SPDP/SEDP starting
+   with sub-phase 4.
 4. **SPDP** (Simple Participant Discovery) — multicast announce/listen
    at a periodic interval with jitter, known-participants table. Mirrors
    `spdp.go` (379 LOC).
