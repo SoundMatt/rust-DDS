@@ -73,6 +73,15 @@ pub mod error;
 pub mod mock;
 pub mod participant;
 pub mod relay;
+
+/// RTPS wire-protocol types (Tier 1 sub-phase 1 of `ROADMAP.md`'s parity
+/// build-out plan). `pub` so the compiler treats it as a real reusable API
+/// surface rather than dead code, but deliberately not re-exported from the
+/// crate root's `pub use` list and not referenced by
+/// `Participant`/`Publisher`/`Subscriber` or `relay::Node` — no behavior
+/// change to the existing public surface. See the `rtps` module docs.
+pub mod rtps;
+
 pub mod types;
 
 pub use adapt::{adapt, from_message, to_message};

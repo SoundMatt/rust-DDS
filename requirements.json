@@ -900,6 +900,76 @@
       "asil": "B",
       "hara": "HAZ-007",
       "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-001",
+      "title": "GuidPrefix/EntityId/GUID wire layout",
+      "text": "The system shall encode a GuidPrefix as 12 raw bytes, an EntityId as 4 raw bytes, and a GUID as the 16-byte concatenation of GuidPrefix followed by EntityId, matching go-DDS's rtps.GUID layout (RTPS 2.3 \u00a79.3.1) byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-002",
+      "title": "Well-known EntityId constants",
+      "text": "The system shall provide EntityId constants for Participant, SPDP writer/reader, and SEDP publication/subscription writer/reader matching the exact byte values of RTPS 2.3 Table 9.1 as implemented by go-DDS's rtps/guid.go.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-003",
+      "title": "Locator wire layout",
+      "text": "The system shall encode a Locator as 24 little-endian bytes: 4-byte kind (i32) + 4-byte port (u32) + 16-byte address, matching go-DDS's rtps.marshalLocator (RTPS 2.3 \u00a79.3.2) byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-004",
+      "title": "ProtocolVersion wire layout",
+      "text": "The system shall encode a ProtocolVersion as 2 raw bytes {major, minor} with no endian conversion, matching go-DDS's rtps.Header.ProtocolVersion field (RTPS 2.3 \u00a79.3.2) byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-005",
+      "title": "VendorId wire layout",
+      "text": "The system shall encode a VendorId as 2 raw bytes with no endian conversion, matching go-DDS's rtps.Header.VendorId field (RTPS 2.3 \u00a79.3.2) byte-for-byte, and shall define rust-DDS's own unregistered vendor ID distinct from go-DDS's 0x0127.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-006",
+      "title": "SequenceNumber wire layout",
+      "text": "The system shall encode a SequenceNumber as 8 little-endian bytes: 4-byte high (i32) followed by 4-byte low (u32), matching go-DDS's rtps.SequenceNumber field layout (RTPS 2.3 \u00a79.3.2) byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-007",
+      "title": "SequenceNumber u64 packing without wraparound aliasing",
+      "text": "The system shall provide to_u64/from_u64 conversions between SequenceNumber{high, low} and a single u64 that are bit-identical to go-DDS's snToU64/u64ToSN (rtps/reliable.go), so reliability bookkeeping never aliases after the low 32 bits wrap (RTPS 2.3 \u00a78.3.5).",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-008",
+      "title": "RTPS message Header wire layout",
+      "text": "The system shall encode the fixed 20-byte RTPS message Header as the 4-byte magic \"RTPS\" followed by ProtocolVersion (2 bytes), VendorId (2 bytes), and GuidPrefix (12 bytes), matching go-DDS's rtps.marshalHeader (RTPS 2.3 \u00a79.4.1) byte-for-byte, and shall reject decode input that does not start with the \"RTPS\" magic.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-009",
+      "title": "RTPS decode never panics on malformed input",
+      "text": "Every decode function for RTPS wire types shall return a Result and never panic, index out of bounds, or unwrap on truncated or malformed input, since decoded bytes originate from an untrusted network transport.",
+      "category": "cybersecurity",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-010",
+      "title": "SubmessageHeader wire layout",
+      "text": "The system shall encode a SubmessageHeader as 4 bytes: 1-byte submessageId + 1-byte flags + 2-byte little-endian octetsToNextHeader, matching go-DDS's rtps submessage header layout (RTPS 2.3 \u00a79.4.2) byte-for-byte, including the DATA/GAP/HEARTBEAT/ACKNACK/INFO_TS submessage ID constants and the Endianness/InlineQos/Data flag bits.",
+      "category": "functional",
+      "criticality": "high"
     }
   ]
 }
