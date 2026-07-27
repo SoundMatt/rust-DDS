@@ -29,8 +29,16 @@
 //! no I/O), while `message` gains the HEARTBEAT/ACKNACK/GAP submessage wire
 //! codec and `participant` gains the heartbeat-send/acknack-handle/
 //! retransmit wiring — mirroring go-DDS's own split across `reliable.go`,
-//! `message.go`, and `participant.go`. Later sub-phases follow the same
-//! layering. This module tree is internal: it is **not**
+//! `message.go`, and `participant.go`. `fragment` (sub-phase 8,
+//! "Fragmentation") adds the DATA_FRAG submessage codec and reassembly
+//! buffer, mirroring go-DDS's `rtps/fragment.go` — `participant` gains
+//! send-side fragmentation in `RtpsWriter::write` (large payloads split
+//! into DATA_FRAG submessages instead of one DATA) and receive-side
+//! reassembly (a `FragmentAssembler` fed from `RtpsParticipant`'s existing
+//! receive loop, dispatching a completed reassembly exactly like a DATA
+//! submessage — see `fragment.rs`'s module docs for why this exceeds
+//! go-DDS's own unwired `fragmentAssembler`). Later sub-phases follow the
+//! same layering. This module tree is internal: it is **not**
 //! re-exported from the crate root and is **not** wired into the public
 //! `Participant`/`Publisher`/`Subscriber` API yet.
 //!
@@ -48,6 +56,7 @@
 //! malformed or truncated input returns `Err(RtpsDecodeError)`, never panics.
 
 pub mod cdr;
+pub mod fragment;
 pub mod guid;
 pub mod locator;
 pub mod message;
