@@ -196,6 +196,34 @@ Sub-phases, scoped against the go-DDS file breakdown:
 5. **SEDP** (Simple Endpoint Discovery) — unicast endpoint announcement
    between participants once SPDP has found them. Mirrors `sedp.go`
    (343 LOC).
+   **Done** — landed in [rust-DDS#26](https://github.com/SoundMatt/rust-DDS/pull/26)
+   as `src/rtps/sedp.rs`: `SedpConfig`/`EndpointInfo`, `build_endpoint_data`
+   (the `PL_CDR_LE` EndpointData payload codec: endpoint GUID, topic name,
+   the hard-coded `"CDR_BLOB"` type name, and a zero-address default
+   unicast locator filled in by the receiver, mirroring
+   `build_participant_data`'s convention), and `SedpService` —
+   `register_writer`/`register_reader` (local endpoint bookkeeping plus
+   immediate broadcast to every peer known to `SpdpService`),
+   `on_new_peer` (announces local endpoints to one newly-discovered peer),
+   a receive loop consuming `transport::RtpsSocket::spawn_receive_loop`'s
+   `mpsc::Receiver` and dispatching SEDP publication/subscription DATA
+   submessages (self-filtered by `GuidPrefix`) into `on_remote_writer`/
+   `on_remote_reader`, topic-based matching against local endpoints, and
+   `on_peer_evicted` to drop a departed peer's endpoints — each piece
+   independently usable, matching `transport.rs`/`spdp.rs`'s established
+   idiom. Since no RTPS participant runtime type exists yet to hold
+   `rtpsReader`/`rtpsWriter` objects (that composition lands with
+   sub-phase 6), matching functions return the matched `EntityId`/`Guid`s
+   for a future caller rather than notifying an object in-line — see the
+   module's "No RTPS participant runtime yet" doc section. Also adds
+   `Locator::udp_addr` (`src/rtps/locator.rs`) for resolving a peer's
+   metatraffic locator to a `SocketAddr` send target. Verified byte-for-byte
+   against real go-DDS reference output (`REQ-RTPS-029`..`035`). Zero
+   `unsafe` (REQ-ASIL-002/REQ-MEM-001). Internal only — not yet wired into
+   `Participant`/`Publisher`/`Subscriber`; consumed by sub-phase 6
+   ("BestEffort data path"). Not in scope here (later Tier 1/2 work): actual
+   sample data delivery, the `EndpointPlugin`/`DiscoveryPlugin`
+   authentication hook, and the participant-liveliness callback.
 6. **BestEffort data path** — DATA submessage encode/decode, dispatch to
    matched readers by topic + writer GUID. This is the bulk of go-DDS's
    `participant.go` (1,505 LOC total; roughly half of it is receive-loop
@@ -400,7 +428,7 @@ harder to change.
 - [ ] Pure-Rust RTPS/UDP transport (`rtps::RtpsParticipant`)
 - [ ] CDR/XCDR1 serialization for RTPS wire format
 - [ ] SPDP participant discovery (multicast + unicast)
-- [ ] SEDP endpoint announcement
+- [x] SEDP endpoint announcement
 - [ ] BestEffort delivery over UDP multicast and unicast
 - [ ] IPv4 and IPv6 multicast support
 
