@@ -660,10 +660,21 @@ impl RtpsParticipant {
     /// IDs, and this participant's own packets (self-filtered by
     /// `GuidPrefix`, same convention as `spdp.rs`/`sedp.rs`) are silently
     /// ignored — never panics (REQ-RTPS-009).
+    ///
+    /// `pub` (rather than the crate-private visibility every other
+    /// sub-phase left this at) specifically so the `rtps-interop-peer`
+    /// binary's reliable-QoS two-process test harness can drive a
+    /// participant's data socket manually — deliberately discarding one
+    /// real, already-kernel-delivered datagram before it reaches this
+    /// method, the same "drop after receipt, before dispatch" technique
+    /// this module's own `reliable_qos_detects_gap_and_retransmits_over_real_udp`
+    /// test uses in-process — without needing any other private state. See
+    /// `ROADMAP.md`'s "Interop testing" section and
+    /// `tests/rtps_two_process_interop.rs`. No behavior change.
     //fusa:req REQ-RTPS-040
     //fusa:req REQ-RTPS-055
     //fusa:req REQ-RTPS-009
-    async fn handle_data_packet(&self, data: &[u8], from: SocketAddr) {
+    pub async fn handle_data_packet(&self, data: &[u8], from: SocketAddr) {
         let Ok(header) = Header::decode(data) else {
             return;
         };

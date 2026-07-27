@@ -91,7 +91,11 @@ tiers is just workspace-manifest overhead. Proposed sequencing:
   Tier 2's `security` work is itself scoped into `dds-core` by the target
   architecture (the table above puts `security` in the same crate as `rtps`
   and `mock`) — so the crate boundary is being drawn around code that's
-  actually staying together, not split further later.
+  actually staying together, not split further later. The "interop-tested"
+  half of this gate is now satisfied (see the "Interop testing" section's
+  **Done** note below, rust-DDS#31); the "Module naming caveat" section's
+  separate #59 gate below is still open, so this cutover still should not
+  start yet.
 - **`crates/dds-safety` created at Tier 2**, holding E2E protection
   (`safety`) first; `tsn` is added to it in Tier 3.
 - **`crates/dds-tools` created at Tier 3** (`idl`, `cdr`, `xtypes`,
@@ -461,6 +465,62 @@ Tier 1 implementation — it should be scoped as its own workstream (a
 Message-level golden vectors today, not RTPS wire captures) and likely
 needs a shared home (not duplicated ad hoc per-repo) once cpp-DDS reaches
 the same point.
+
+**Done (deliverables 1 and 2 of 3)** — landed in
+[rust-DDS#31](https://github.com/SoundMatt/rust-DDS/pull/31) as a new
+`rtps-interop` CI job, separate from and in addition to the Tier 1
+sub-phase work above, exactly as scoped:
+
+- **Live two-process test harness** (the minimum bar) — `rtps-interop-peer`
+  (`src/bin/rtps_interop_peer.rs`, a `[[bin]]` target, not part of the
+  public library API), a standalone RTPS participant process driven
+  entirely by the real, production `rust_dds::rtps` machinery (real SPDP
+  multicast announce/receive/evict, real SEDP unicast announce/receive/
+  match, real BestEffort/Reliable data path — no test-only shortcuts).
+  `tests/rtps_two_process_interop.rs` spawns two of these as separate OS
+  processes on real UDP loopback/multicast and asserts SPDP discovers both
+  sides, SEDP matches the writer/reader pair, and samples flow end-to-end —
+  including a reliable-QoS run where the reader process deliberately
+  discards its own first real receipt of one datagram (a real UDP
+  datagram sent by the writer's OS process, already delivered by the
+  kernel to the reader's socket, discarded before RTPS dispatch — see
+  `RtpsParticipant::handle_data_packet`'s doc comment) and the test
+  asserts every sample, including the dropped one, still arrives via
+  ACKNACK-driven retransmission and lands in original sequence order —
+  the case sub-phase 7's own `reliable_qos_detects_gap_and_retransmits_over_real_udp`
+  explicitly does not prove (two live *processes*, not one process's own
+  test suite). `#[ignore]`d in the default `cargo test` sweep (unsuited to
+  the cross-platform OS/Rust test matrix); runs in the new `rtps-interop`
+  CI job (ubuntu-only) via `cargo test --release --test
+  rtps_two_process_interop -- --ignored --test-threads=1`.
+- **pcap-fixture conformance** — `src/rtps/pcap.rs`: a pure, `unsafe`-free
+  encoder/decoder for the standard libpcap file format (global header +
+  IPv4/UDP-framed records, `LINKTYPE_RAW`) wrapping RTPS messages, real
+  enough to open in Wireshark/`tcpdump -r`. `tests/fixtures/rtps_go_dds_reference.pcap`
+  (regenerated via `cargo run --example generate_rtps_pcap_fixture`)
+  records seven RTPS 2.3 §9 messages — SPDP announcement, SEDP
+  publication + subscription announcements, plain DATA, HEARTBEAT,
+  ACKNACK, GAP — built from bytes this crate's own Tier 1 sub-phases
+  already independently verified byte-for-byte against go-DDS's real
+  encoder (never reimplemented); `tests/rtps_pcap_conformance.rs` decodes
+  the checked-in fixture and asserts every message byte-for-byte and via
+  this crate's own `Header`/`SubmessageIter`/`decode_*` functions, with no
+  live peer process and no network I/O (runs in the default `cargo test`
+  sweep as well as the `rtps-interop` job). REQ-RTPS-058.
+
+**Deliverable 3 of 3 — deferred, not done in rust-DDS#31**: a third,
+independent oracle beyond go-DDS self-interop (CycloneDDS, via go-DDS's
+existing `cyclone` CGo bridge). Installing and driving a real CycloneDDS C
+library is a substantial, environment-dependent undertaking in its own
+right (a native dependency + CGo build, not pure-Rust/pure-Go code this
+repository already builds) — genuinely out of scope for the PR that landed
+deliverables 1 and 2, and not something to claim done without an actual
+CycloneDDS build actually exercised. Tracked as follow-up work, not
+blocking: the roadmap's "minimum bar" for Tier 1 completion (deliverable 1)
+is met, and deliverable 2 substantially reduces reliance on go-DDS being
+the *only* correctness check by making the wire-format regression tests
+fixture-based rather than solely go-DDS-self-interop-based. A third
+independent oracle remains valuable future work, not a Tier 1 blocker.
 
 ### Tier 2 — Safety (E2E) + Security
 

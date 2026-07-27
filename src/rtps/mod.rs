@@ -64,6 +64,19 @@
 //! carried forward from the crate-wide constraint) and no `.unwrap()` on
 //! decode paths that accept untrusted/external bytes (REQ-ASIL-003):
 //! malformed or truncated input returns `Err(RtpsDecodeError)`, never panics.
+//!
+//! All nine Tier 1 sub-phases above are internal-only and unit/in-process-
+//! integration-tested; none of that proves two independent OS processes
+//! actually interoperate over a real wire, which is a distinct gap
+//! `ROADMAP.md`'s "Interop testing" section calls out explicitly. `pcap`
+//! (this module tree's tenth module, not a Tier 1 sub-phase — it is the
+//! "pcap-fixture conformance" deliverable of that section) is a pure pcap
+//! container encoder/decoder used to check recorded, known-good go-DDS
+//! RTPS traffic byte-for-byte without needing a live peer; the "live
+//! two-process harness" deliverable itself lives outside this module tree,
+//! in the crate's `rtps-interop-peer` binary (`src/bin/`) and
+//! `tests/rtps_two_process_interop.rs`, since it is a standalone process,
+//! not a wire type.
 
 pub mod cdr;
 pub mod fragment;
@@ -71,6 +84,7 @@ pub mod guid;
 pub mod locator;
 pub mod message;
 pub mod participant;
+pub mod pcap;
 pub mod persist;
 pub mod reliable;
 pub mod sedp;

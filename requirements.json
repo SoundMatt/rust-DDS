@@ -1299,6 +1299,13 @@
       "text": "The system shall, when configured with a persistence directory, persist the most recently written payload for each topic to a single file per topic (a 4-byte little-endian length prefix followed by the raw payload bytes) on every write, and shall load a topic's persisted payload from disk to deliver to a newly-registered TransientLocal reader when no in-memory last sample exists yet for that topic, matching go-DDS's WithPersistentHistory/persistLoad/persistFlush behaviourally and byte-for-byte for the on-disk file format; disk I/O failures during load or flush shall never panic or propagate as a write failure to the caller.",
       "category": "functional",
       "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-058",
+      "title": "pcap-fixture wire-format conformance",
+      "text": "The system shall provide a pure encoder and decoder for the standard libpcap file format (global header plus per-record IPv4/UDP framing) sufficient to read a checked-in fixture of known-good RTPS 2.3 section-9 messages sourced from go-DDS's real encoder, and decoding each recorded message's RTPS Header and submessage stream shall reproduce the exact same field values and bytes as go-DDS's own reference output for those messages, so that wire-format regressions in this crate's RTPS decode path are caught without requiring a live peer process; decoding malformed or truncated pcap input shall never panic.",
+      "category": "functional",
+      "criticality": "medium"
     }
   ]
 }
