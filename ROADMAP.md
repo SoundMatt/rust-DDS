@@ -124,6 +124,11 @@ Sub-phases, scoped against the go-DDS file breakdown:
    `guid.go` (81 LOC), `locator.go` (136 LOC), the framing half of
    `message.go` (365 LOC total). Magic bytes `"RTPS"`, a vendor ID
    (go-DDS uses an unregistered `0x0127`; rust-DDS needs its own).
+   **Done** — landed in [rust-DDS#22](https://github.com/SoundMatt/rust-DDS/pull/22)
+   as `src/rtps/{guid,locator,message}.rs`, verified byte-for-byte against
+   real go-DDS reference output (`REQ-RTPS-001`..`010`). Internal only —
+   not yet wired into `Participant`/`Publisher`/`Subscriber`; that starts
+   with sub-phase 3 (UDP transport).
 2. **Minimal wire-level CDR** — just enough Common Data Representation to
    encode/decode RTPS submessage headers and inline QoS parameter lists
    (mirrors go-DDS's `rtps/cdr.go`, 193 LOC). **This is deliberately not**
