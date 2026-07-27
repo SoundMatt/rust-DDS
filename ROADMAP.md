@@ -228,6 +228,41 @@ Sub-phases, scoped against the go-DDS file breakdown:
    matched readers by topic + writer GUID. This is the bulk of go-DDS's
    `participant.go` (1,505 LOC total; roughly half of it is receive-loop
    dispatch and reader/writer bookkeeping).
+   **Done** — landed in [rust-DDS#27](https://github.com/SoundMatt/rust-DDS/pull/27)
+   as `src/rtps/participant.rs`: the first RTPS participant runtime type,
+   `RtpsParticipant` — owns `rtpsReader`/`rtpsWriter`-shaped local endpoint
+   bookkeeping (`RtpsWriter`/`RtpsReader` handles from `new_writer`/
+   `new_reader`), reuses `crate::participant::SampleReceiver`/`SubInner` for
+   reader delivery (per the roadmap's async design table, rather than
+   inventing a second channel type), and performs real BestEffort DATA
+   submessage encode/decode + dispatch to matched local readers by topic
+   (local delivery) and by SEDP-matched writer GUID (remote/UDP delivery) —
+   composing sub-phase 2's `wrap_payload`/`unwrap_payload` and sub-phase 4's
+   `encode_data_submessage`/`decode_data_submessage`/`wrap_in_rtps_message`,
+   all previously verified byte-for-byte against go-DDS, so no new wire
+   format is introduced here. Also extends `sedp.rs` with
+   `SedpService::set_match_listener`/`WriterMatch` and `spdp.rs` with
+   `SpdpService::set_peer_listener`, the "future caller" hooks those two
+   modules' own docs anticipated — `RtpsParticipant::spawn_sedp_match_listener`
+   and `RtpsParticipant::spawn_spdp_peer_listener` consume them to keep a
+   reader's accepted-writer-GUID set in sync with SEDP matching discovered
+   after registration, and to bridge SPDP peer discovery into SEDP
+   (`sedp.on_new_peer`) the way go-DDS's `spdpService.handlePacket` calls
+   `s.p.sedp.onNewPeer` directly. Also adds `entity_id_for_writer`/
+   `entity_id_for_reader` and `Guid::to_bytes` to `guid.rs`. Verified against
+   real go-DDS reference output for the DATA submessage composition and the
+   `entityIdForWriter`/`entityIdForReader` byte layout (`REQ-RTPS-036`,
+   `REQ-RTPS-037`), plus a real two-participant round trip over loopback UDP
+   (`REQ-RTPS-038`..`042`) exercising SEDP-matched BestEffort delivery
+   end-to-end — not just discovery. Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001).
+   Internal only — not yet wired into `Participant`/`Publisher`/`Subscriber`.
+   Not in scope here (later Tier 1 work, per the roadmap's own scoping):
+   `INFO_TS`-based timestamp propagation (every delivered `Sample`'s
+   `timestamp` is the delivering side's `Utc::now()`, a documented deviation
+   — see the module's "DATA submessage payload" doc section), HEARTBEAT/
+   ACKNACK reliable-QoS retransmission (sub-phase 7), `DATA_FRAG`
+   fragmentation (sub-phase 8), and TransientLocal/wildcard-topic matching
+   (sub-phase 9's stretch items).
 7. **Reliable QoS** — HEARTBEAT / ACKNACK retransmission, per-writer
    history cache (go-DDS retains 256 samples per writer), gap detection on
    the reader side. Mirrors `reliable.go` (231 LOC) plus the

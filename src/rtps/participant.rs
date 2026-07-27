@@ -1,0 +1,1090 @@
+// Copyright (c) 2026 Matt Jones. All rights reserved.
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+//! RTPS participant runtime — the BestEffort data path (RTPS 2.3 §8.4/§8.7).
+//!
+//! This is Tier 1 sub-phase 6 of the parity build-out plan in `ROADMAP.md`
+//! ("Tier 1 — RTPS wire-protocol port" → "BestEffort data path"): the first
+//! module in this tree to actually own `rtpsReader`/`rtpsWriter`-shaped
+//! runtime objects, composing `transport` (sub-phase 3), `spdp` (sub-phase
+//! 4), and `sedp` (sub-phase 5) into something that delivers real DDS
+//! samples end-to-end over UDP. Mirrors the receive-loop-dispatch and
+//! reader/writer-bookkeeping half of go-DDS's `rtps/participant.go` (1,505
+//! LOC total) — specifically `handleDataPacket`, `dispatchToReaders`,
+//! `deliverToReader`, `NewPublisher`/`NewSubscriber`'s registration
+//! bookkeeping, and the BestEffort (non-`w.reliable`) half of
+//! `rtpsWriter.Write`. **Not** ported here (explicitly out of scope for
+//! this sub-phase, per `ROADMAP.md`): HEARTBEAT/ACKNACK reliable-QoS
+//! retransmission (`notifyReliableReaders`/`handleHeartbeat`/
+//! `handleAckNack`, `reliable.go` — that's sub-phase 7), `DATA_FRAG`
+//! fragmentation (sub-phase 8), and the small stretch items in sub-phase 9
+//! (TransientLocal persistence, topic wildcard matching).
+//!
+//! # Wiring SEDP's match output
+//!
+//! `sedp.rs`'s own module docs describe why, until this sub-phase landed,
+//! [`super::sedp::SedpService::on_remote_writer`] and
+//! [`super::sedp::SedpService::register_reader`] *returned* matched
+//! `EntityId`/`Guid` values instead of notifying a reader object in-line —
+//! no participant runtime type existed yet to hold one. [`RtpsParticipant`]
+//! is that runtime type:
+//!
+//! - [`RtpsParticipant::new_reader`] consumes [`SedpService::register_reader`](super::sedp::SedpService::register_reader)'s
+//!   synchronous return value directly (remote writers already known *at*
+//!   registration time).
+//! - [`RtpsParticipant::spawn_sedp_match_listener`] consumes
+//!   [`super::sedp::WriterMatch`] events (via
+//!   [`SedpService::set_match_listener`](super::sedp::SedpService::set_match_listener))
+//!   for the asynchronous case: a remote writer discovered *after* the
+//!   local reader was already registered, which only SEDP's own private
+//!   receive loop observes.
+//!
+//! Either path ends the same way: the matched remote writer's `Guid` is
+//! added to the reader's accepted-source set ([`ReaderState::sources`]),
+//! mirroring go-DDS's `rtpsReader.addSourceGUID`.
+//!
+//! # DATA submessage payload
+//!
+//! No new wire format is introduced by this module — it composes
+//! primitives already verified byte-for-byte against go-DDS in earlier
+//! sub-phases: [`super::cdr::wrap_payload`]/[`super::cdr::unwrap_payload`]
+//! (the `CDR_LE` payload encapsulation, sub-phase 2),
+//! [`super::message::encode_data_submessage`]/[`super::message::decode_data_submessage`]
+//! (sub-phase 4), and [`super::message::wrap_in_rtps_message`] (sub-phase
+//! 4). [`RtpsWriter::write`]'s test verifies the *composition* of those
+//! primitives for a fixed payload still matches go-DDS's own composition
+//! (`cdrWrapPayload` → `marshalDataSubmessage` → `wrapInRTPSMessage`) — see
+//! its doc comment for the exact reproduction command.
+//!
+//! One deliberate, documented deviation from go-DDS: go-DDS's
+//! `rtpsWriter.Write` always prepends an `INFO_TS` submessage carrying the
+//! write's wall-clock timestamp, which `handleDataPacket` on the receiving
+//! side reattaches to the delivered [`Sample`](crate::types::Sample)'s
+//! `timestamp` field. `INFO_TS` encode/decode does not exist yet in this
+//! crate (`message.rs` only defines the `SUBMSG_INFO_TS` submessage-id
+//! constant, no body codec) — out of scope for this sub-phase, per
+//! `ROADMAP.md`'s scoping of sub-phase 6 to "DATA submessage encode/decode,
+//! dispatch ... by topic + writer GUID" (no mention of inline timestamp
+//! propagation, unlike sub-phase 5's explicit inline-QoS carve-out). Until
+//! a later sub-phase adds it, every delivered `Sample`'s `timestamp` is
+//! `Utc::now()` at the delivering side (local dispatch: the writer's own
+//! `write()` call time; remote dispatch: the reader's receive time) rather
+//! than the writer's original send time — a deviation, not a correctness
+//! bug, and one `Sample::timestamp`'s own doc comment already anticipates
+//! ("zero ... means no timestamp was provided by the transport").
+//!
+//! # Reusing `SampleReceiver`
+//!
+//! Per `ROADMAP.md`'s async/tokio design section (the go-DDS→rust-DDS
+//! translation table), a reader's delivery channel reuses
+//! [`crate::participant::SampleReceiver`]/[`crate::participant::SubInner`]
+//! — the same type [`crate::mock::MockParticipant`] hands back from
+//! `new_subscriber` — rather than inventing a second "reader channel" type.
+//! [`RtpsParticipant::new_reader`] returns a real `SampleReceiver`;
+//! `ReaderState` holds the matching `Arc<SubInner>` and calls
+//! [`SubInner::push`] on delivery, exactly like `MockParticipant`'s broker.
+//!
+//! # Async model
+//!
+//! Same idiom as `spdp.rs`/`sedp.rs`: every long-running loop
+//! ([`RtpsParticipant::spawn_receive_loop`],
+//! [`RtpsParticipant::spawn_sedp_match_listener`]) is its own `tokio::task`,
+//! independently stoppable via `.abort()` on its returned `JoinHandle`.
+//! Endpoint bookkeeping (`readers`, `writers`) is guarded by a plain
+//! `tokio::sync::RwLock`, held only for brief map lookups/inserts — never
+//! across a socket send.
+//!
+//! No `unsafe` anywhere (REQ-ASIL-002 / REQ-MEM-001) and no panics on
+//! malformed/truncated decode input (REQ-ASIL-003 / REQ-RTPS-009):
+//! [`RtpsParticipant::handle_data_packet`] and everything it calls treats
+//! malformed input as "ignore this datagram", never as a crash.
+//!
+//! Internal only: not re-exported from the crate root, not yet wired into
+//! `Participant`/`Publisher`/`Subscriber`.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use tokio::sync::{mpsc, RwLock};
+use tokio::task::JoinHandle;
+
+use crate::participant::{SampleReceiver, SubInner};
+use crate::relay::SubscriberOptions;
+use crate::types::Sample;
+
+use super::cdr::{unwrap_payload, wrap_payload};
+use super::guid::{
+    entity_id_for_reader, entity_id_for_writer, EntityId, Guid, GuidPrefix, ENTITYID_UNKNOWN,
+};
+use super::message::{
+    decode_data_submessage, encode_data_submessage, wrap_in_rtps_message, Header, SequenceNumber,
+    SubmessageIter, VendorId, PROTOCOL_VERSION_2_3, SUBMSG_DATA,
+};
+use super::sedp::SedpService;
+use super::transport::{RtpsDatagram, RtpsSocket};
+
+// ---------------------------------------------------------------------------
+// ReaderState / WriterState
+// ---------------------------------------------------------------------------
+
+/// Per-reader bookkeeping. Matches go-DDS's `rtpsReader` (the delivery-path
+/// subset relevant to BestEffort — reliability trackers are sub-phase 7).
+struct ReaderState {
+    topic: String,
+    /// SEDP-matched remote writer `Guid`s this reader accepts samples from,
+    /// in addition to any writer sharing this participant's own
+    /// `GuidPrefix` (always accepted regardless of this set — see
+    /// [`RtpsParticipant::accepts_source`]). Matches go-DDS's
+    /// `rtpsReader.sources`.
+    sources: RwLock<HashSet<Guid>>,
+    inner: Arc<SubInner>,
+}
+
+/// Per-writer bookkeeping. Matches go-DDS's `rtpsWriter` (the BestEffort
+/// delivery-path subset — `history`/`hbDone`/`drainCh` are reliable-QoS-only
+/// fields, sub-phase 7). The topic name itself lives on [`RtpsWriter`], not
+/// here — this table only needs to track sequence-number assignment per
+/// registered writer entity.
+struct WriterState {
+    /// Next sequence number to assign; matches go-DDS's `rtpsWriter.seq`
+    /// (full 64-bit, pre-increment — see [`RtpsWriter::write`]).
+    seq: AtomicU64,
+}
+
+// ---------------------------------------------------------------------------
+// RtpsParticipant
+// ---------------------------------------------------------------------------
+
+/// Owns one participant's RTPS reader/writer bookkeeping and the BestEffort
+/// send/receive data path. Composes an already-running
+/// [`SedpService`]/[`RtpsSocket`] rather than owning discovery or socket
+/// lifecycle itself — those are sub-phases 3–5's responsibility; a caller
+/// typically constructs `SpdpService`/`SedpService`/the data-unicast
+/// `RtpsSocket` first (as `sedp.rs`'s own tests do) and passes the latter
+/// two here.
+pub struct RtpsParticipant {
+    guid_prefix: GuidPrefix,
+    vendor_id: VendorId,
+    data_socket: Arc<RtpsSocket>,
+    sedp: Arc<SedpService>,
+    entity_counter: AtomicU32,
+    readers: RwLock<HashMap<EntityId, Arc<ReaderState>>>,
+    writers: RwLock<HashMap<EntityId, Arc<WriterState>>>,
+    delivers: AtomicU64,
+    drops: AtomicU64,
+}
+
+impl RtpsParticipant {
+    /// Creates a new participant runtime. `data_socket` is used both to
+    /// *send* user-data DATA submessages (see [`RtpsWriter::write`]) and,
+    /// via [`RtpsParticipant::spawn_receive_loop`], to receive them —
+    /// matching go-DDS's single `p.dataSock` serving both roles. `sedp` is
+    /// this participant's already-running [`SedpService`], used both to
+    /// register local endpoints and to resolve matched remote readers'
+    /// delivery locators on every write.
+    //fusa:req REQ-RTPS-041
+    pub fn new(
+        guid_prefix: GuidPrefix,
+        vendor_id: VendorId,
+        data_socket: Arc<RtpsSocket>,
+        sedp: Arc<SedpService>,
+    ) -> Arc<Self> {
+        Arc::new(RtpsParticipant {
+            guid_prefix,
+            vendor_id,
+            data_socket,
+            sedp,
+            entity_counter: AtomicU32::new(0),
+            readers: RwLock::new(HashMap::new()),
+            writers: RwLock::new(HashMap::new()),
+            delivers: AtomicU64::new(0),
+            drops: AtomicU64::new(0),
+        })
+    }
+
+    /// This participant's own `GuidPrefix`.
+    pub fn guid_prefix(&self) -> GuidPrefix {
+        self.guid_prefix
+    }
+
+    fn next_entity_num(&self) -> u32 {
+        self.entity_counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    // ── Writer registration ─────────────────────────────────────────────
+
+    /// Registers a new local writer for `topic` and announces it via SEDP
+    /// to every known peer. Matches go-DDS's `NewPublisher`'s registration
+    /// half (entity-id assignment, `p.writers[eid] = w`,
+    /// `p.sedp.registerWriter`).
+    //fusa:req REQ-RTPS-041
+    pub async fn new_writer(self: &Arc<Self>, topic: impl Into<String>) -> RtpsWriter {
+        let topic = topic.into();
+        let eid = entity_id_for_writer(self.next_entity_num());
+        self.writers.write().await.insert(
+            eid,
+            Arc::new(WriterState {
+                seq: AtomicU64::new(0),
+            }),
+        );
+        self.sedp.register_writer(eid, topic.clone()).await;
+        RtpsWriter {
+            participant: Arc::clone(self),
+            eid,
+            topic,
+        }
+    }
+
+    // ── Reader registration ─────────────────────────────────────────────
+
+    /// Registers a new local reader for `topic`, announces it via SEDP, and
+    /// pre-populates its accepted-source set from any remote writer SEDP
+    /// already knows about for this topic. Matches go-DDS's
+    /// `NewSubscriber`'s registration half (entity-id assignment,
+    /// `p.readers[eid] = r`, `p.sedp.registerReader`). `opts.chan_depth`/
+    /// `opts.back_pressure` configure the returned [`SampleReceiver`]'s
+    /// queue exactly as [`crate::mock::MockParticipant::new_subscriber`]
+    /// does (default depth 64, matching go-DDS's own
+    /// `cfg.ChanDepth(64)`).
+    ///
+    /// TransientLocal late-joiner delivery (go-DDS's `NewSubscriber`
+    /// delivering `p.lastSample`) is not in scope for this sub-phase — see
+    /// `ROADMAP.md` sub-phase 9's "TransientLocal durability persistence
+    /// hooks" stretch item.
+    //fusa:req REQ-RTPS-041
+    pub async fn new_reader(
+        self: &Arc<Self>,
+        topic: impl Into<String>,
+        opts: SubscriberOptions,
+    ) -> (SampleReceiver, RtpsReader) {
+        let topic = topic.into();
+        let eid = entity_id_for_reader(self.next_entity_num());
+        let depth = opts.chan_depth(64);
+        let inner = Arc::new(SubInner::new(depth, opts.back_pressure));
+        let state = Arc::new(ReaderState {
+            topic: topic.clone(),
+            sources: RwLock::new(HashSet::new()),
+            inner: Arc::clone(&inner),
+        });
+        self.readers.write().await.insert(eid, Arc::clone(&state));
+
+        let matched = self.sedp.register_reader(eid, topic.clone()).await;
+        if !matched.is_empty() {
+            let mut sources = state.sources.write().await;
+            for g in matched {
+                sources.insert(g);
+            }
+        }
+
+        (
+            SampleReceiver { inner },
+            RtpsReader {
+                participant: Arc::clone(self),
+                eid,
+            },
+        )
+    }
+
+    /// Removes a reader from the dispatch table. Matches go-DDS's
+    /// `rtpsReader.Unsubscribe` (the participant-side half — this crate's
+    /// `SampleReceiver` has no separate `Close`, so there is no
+    /// `rtpsReader.Close` counterpart to port here).
+    async fn remove_reader(&self, eid: EntityId) {
+        self.readers.write().await.remove(&eid);
+    }
+
+    // ── SEDP match-notification wiring ──────────────────────────────────
+
+    /// Spawns a task that consumes [`super::sedp::WriterMatch`] events from
+    /// this participant's [`SedpService`] (registering itself as the
+    /// listener via [`SedpService::set_match_listener`](super::sedp::SedpService::set_match_listener))
+    /// and adds each matched writer `Guid` to the named reader's accepted
+    /// source set — the asynchronous counterpart to
+    /// [`RtpsParticipant::new_reader`]'s synchronous match. See the module
+    /// docs' "Wiring SEDP's match output" section. Exits once the sender
+    /// side (owned internally by [`SedpService`]) is dropped, i.e. when
+    /// `sedp` itself is dropped.
+    //fusa:req REQ-RTPS-039
+    pub async fn spawn_sedp_match_listener(self: &Arc<Self>) -> JoinHandle<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        self.sedp.set_match_listener(tx).await;
+        let participant = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                let readers = participant.readers.read().await;
+                if let Some(state) = readers.get(&event.reader_eid) {
+                    state.sources.write().await.insert(event.writer_guid);
+                }
+            }
+        })
+    }
+
+    /// Spawns a task that consumes [`super::spdp::ParticipantProxy`] events
+    /// from `spdp` (registering itself as `spdp`'s listener via
+    /// [`SpdpService::set_peer_listener`](super::spdp::SpdpService::set_peer_listener))
+    /// and forwards each into [`SedpService::on_new_peer`](super::sedp::SedpService::on_new_peer)
+    /// on this participant's own `SedpService` — the bridge go-DDS gets for
+    /// free from `spdpService.handlePacket` calling `s.p.sedp.onNewPeer`
+    /// directly, which rust-DDS's `spdp`/`sedp` module split cannot do
+    /// without this participant-level glue (see
+    /// [`SpdpService::set_peer_listener`](super::spdp::SpdpService::set_peer_listener)'s
+    /// docs for why). `spdp` is a parameter rather than a field on
+    /// [`RtpsParticipant`] because — unlike `sedp` — this participant type
+    /// has no other use for a `SpdpService` reference; passing it once here
+    /// avoids holding a reference this module otherwise never needs. Exits
+    /// once `spdp`'s sender side is dropped, i.e. when `spdp` itself is
+    /// dropped.
+    //fusa:req REQ-RTPS-042
+    pub async fn spawn_spdp_peer_listener(
+        self: &Arc<Self>,
+        spdp: Arc<super::spdp::SpdpService>,
+    ) -> JoinHandle<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spdp.set_peer_listener(tx).await;
+        let participant = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Some(proxy) = rx.recv().await {
+                participant.sedp.on_new_peer(&proxy).await;
+            }
+        })
+    }
+
+    // ── Receive path ─────────────────────────────────────────────────────
+
+    /// Spawns the receive loop: consumes `rx` (produced by
+    /// [`RtpsSocket::spawn_receive_loop`](super::transport::RtpsSocket::spawn_receive_loop)
+    /// on this participant's data-unicast socket) and decodes/dispatches
+    /// each DATA submessage. Matches go-DDS's `dataReceiveLoop` (the
+    /// single-socket case; go-DDS's IPv6/multicast fan-in via
+    /// `reflect.Select` has no rust-DDS counterpart yet since
+    /// `RtpsSocket::spawn_receive_loop` is one task per socket — a caller
+    /// with multiple data sockets spawns one receive loop per socket, all
+    /// feeding the same `RtpsParticipant`). Exits once `rx` is closed.
+    //fusa:req REQ-RTPS-040
+    pub fn spawn_receive_loop(
+        self: Arc<Self>,
+        mut rx: mpsc::Receiver<RtpsDatagram>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(datagram) = rx.recv().await {
+                self.handle_data_packet(&datagram.data).await;
+            }
+        })
+    }
+
+    /// Decodes one received datagram and dispatches every well-formed DATA
+    /// submessage in it to matched local readers. Matches go-DDS's
+    /// `handleDataPacket` (the BestEffort subset —
+    /// `notifyReliableReaders`/HEARTBEAT/ACKNACK handling is sub-phase 7).
+    /// Malformed input, non-DATA submessages, and this participant's own
+    /// packets (self-filtered by `GuidPrefix`, same convention as
+    /// `spdp.rs`/`sedp.rs`) are silently ignored — never panics
+    /// (REQ-RTPS-009).
+    //fusa:req REQ-RTPS-040
+    //fusa:req REQ-RTPS-009
+    async fn handle_data_packet(&self, data: &[u8]) {
+        let Ok(header) = Header::decode(data) else {
+            return;
+        };
+        if header.guid_prefix == self.guid_prefix {
+            return; // own packet
+        }
+        let body = &data[Header::LEN..];
+        for result in SubmessageIter::new(body) {
+            let Ok(raw) = result else {
+                break;
+            };
+            if raw.id != SUBMSG_DATA {
+                continue;
+            }
+            let Ok(ds) = decode_data_submessage(raw.flags, raw.body) else {
+                continue;
+            };
+            let Some(payload) = ds.payload else {
+                continue;
+            };
+            let Ok(raw_payload) = unwrap_payload(&payload) else {
+                continue;
+            };
+            let source = Guid {
+                prefix: header.guid_prefix,
+                entity: ds.writer_entity_id,
+            };
+            self.dispatch_to_readers(
+                source,
+                None,
+                raw_payload.to_vec(),
+                Utc::now(),
+                ds.seq_num.to_u64(),
+            )
+            .await;
+        }
+    }
+
+    // ── Dispatch ─────────────────────────────────────────────────────────
+
+    /// Delivers `payload` to every local reader that matches. `topic_filter
+    /// = Some(t)` restricts delivery to readers whose topic is exactly `t`
+    /// (used for local, same-process delivery, where the topic is known
+    /// directly — matches go-DDS's `w.p.dispatchToReaders(..., w.topic,
+    /// ...)`); `topic_filter = None` disables topic filtering and relies
+    /// entirely on [`RtpsParticipant::accepts_source`] (used for the UDP
+    /// receive path, where the DATA submessage carries no topic name —
+    /// matches go-DDS's `dispatchToReaders(..., "", ...)`). No topic
+    /// wildcard matching (go-DDS's `TopicMatches`/`wildcard.go`) — that is
+    /// sub-phase 9 stretch-item scope.
+    //fusa:req REQ-RTPS-038
+    async fn dispatch_to_readers(
+        &self,
+        source: Guid,
+        topic_filter: Option<&str>,
+        payload: Vec<u8>,
+        timestamp: DateTime<Utc>,
+        seq_num: u64,
+    ) {
+        let readers: Vec<Arc<ReaderState>> = self.readers.read().await.values().cloned().collect();
+        let writer_guid = source.to_bytes();
+        for state in &readers {
+            if let Some(tf) = topic_filter {
+                if state.topic != tf {
+                    continue;
+                }
+            }
+            if !Self::accepts_source(state, self.guid_prefix, source).await {
+                continue;
+            }
+            let sample = Sample {
+                topic: state.topic.clone(),
+                payload: payload.clone(),
+                timestamp,
+                sequence_number: seq_num,
+                writer_guid,
+            };
+            if state.inner.push(sample) {
+                self.delivers.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Whether `state`'s reader accepts samples from writer `source`.
+    /// Matches go-DDS's `rtpsReader.acceptsSource` exactly: with no
+    /// SEDP-matched sources recorded yet, only this participant's own
+    /// writers (same `GuidPrefix`) are accepted; once at least one remote
+    /// source is recorded, this participant's own writers are *still*
+    /// always accepted, in addition to any explicitly-matched remote one.
+    //fusa:req REQ-RTPS-038
+    async fn accepts_source(state: &ReaderState, own_prefix: GuidPrefix, source: Guid) -> bool {
+        let sources = state.sources.read().await;
+        if sources.is_empty() {
+            return source.prefix == own_prefix;
+        }
+        if source.prefix == own_prefix {
+            return true;
+        }
+        sources.contains(&source)
+    }
+
+    // ── Queries ──────────────────────────────────────────────────────────
+
+    /// Cumulative count of samples successfully delivered to some reader
+    /// (one increment per reader per sample, matching go-DDS's `mDelivers`
+    /// counter granularity).
+    pub fn delivers(&self) -> u64 {
+        self.delivers.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative count of samples dropped due to a full reader queue
+    /// under `DropNewest`/unsubscribed/closed — matches go-DDS's `mDrops`.
+    pub fn drops(&self) -> u64 {
+        self.drops.load(Ordering::Relaxed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RtpsWriter
+// ---------------------------------------------------------------------------
+
+/// A registered local writer. Created by [`RtpsParticipant::new_writer`].
+/// Matches go-DDS's `rtpsWriter` (BestEffort subset).
+pub struct RtpsWriter {
+    participant: Arc<RtpsParticipant>,
+    eid: EntityId,
+    topic: String,
+}
+
+impl RtpsWriter {
+    /// This writer's topic name.
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    /// This writer's `EntityId`.
+    pub fn entity_id(&self) -> EntityId {
+        self.eid
+    }
+
+    /// Encodes `payload` as a BestEffort DATA submessage (`CDR_LE`
+    /// encapsulation, no inline QoS, no `INFO_TS` — see the module docs'
+    /// "DATA submessage payload" section for the latter's deliberate
+    /// deviation from go-DDS), delivers it immediately to any local
+    /// (same-process) readers on this writer's topic, then sends the wire
+    /// message to every remote reader SEDP has matched to this topic.
+    /// Matches go-DDS's `rtpsWriter.Write`'s BestEffort path
+    /// (`w.reliable == false`): no history store, no HEARTBEAT.
+    ///
+    /// Reference bytes reproduced from go-DDS's actual `rtps` package
+    /// (real `cdrWrapPayload`/`marshalDataSubmessage`/`wrapInRTPSMessage`,
+    /// not reimplemented). Go reproduction (package-local scratch test
+    /// file, `rtps/zzrepro_participant_test.go`, never committed to
+    /// go-DDS, deleted after use):
+    ///
+    /// ```text
+    /// var prefix GuidPrefix
+    /// for i := 0; i < 12; i++ { prefix[i] = byte(i + 1) }
+    /// writerEID := entityIdForWriter(1)
+    /// payload := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02}
+    ///
+    /// wrapped := cdrWrapPayload(payload)
+    /// fmt.Printf("wrapped=%x\n", wrapped)
+    /// // -> wrapped=01000000deadbeef0102
+    ///
+    /// submsg := marshalDataSubmessage(writerEID, EntityIdUnknown,
+    ///     SequenceNumber{High: 0, Low: 1}, wrapped)
+    /// fmt.Printf("submsg=%x\n", submsg)
+    /// // -> submsg=15051e00000010000000000000000103000000000100000001000000deadbeef0102
+    ///
+    /// msg := wrapInRTPSMessage(prefix, submsg)
+    /// fmt.Printf("msg=%x\n", msg)
+    /// // -> msg=52545053020301270102030405060708090a0b0c15051e0000001000000000
+    /// //         0000000103000000000100000001000000deadbeef0102
+    /// fmt.Printf("msglen=%d\n", len(msg)) // -> 54
+    /// ```
+    ///
+    /// Full run: `go test ./rtps/... -run TestZZReproParticipantDataBytes -v`
+    /// (go-DDS commit 9d81543 / rust-DDS branch feat/rtps-besteffort-data).
+    //fusa:req REQ-RTPS-037
+    pub async fn write(&self, payload: &[u8]) -> std::io::Result<()> {
+        let writer_state = {
+            let writers = self.participant.writers.read().await;
+            writers.get(&self.eid).cloned()
+        };
+        let Some(writer_state) = writer_state else {
+            // Writer was removed from the participant's table out from
+            // under this handle; treat as a silent no-op rather than an
+            // error surface (this sub-phase has no `Close`/`Unsubscribe`
+            // path for writers yet — see the module docs).
+            return Ok(());
+        };
+        let seq = writer_state.seq.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let wrapped = wrap_payload(payload);
+        let submsg = encode_data_submessage(
+            self.eid,
+            ENTITYID_UNKNOWN,
+            SequenceNumber::from_u64(seq),
+            &wrapped,
+        );
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: self.participant.vendor_id,
+            guid_prefix: self.participant.guid_prefix,
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+
+        let source = Guid {
+            prefix: self.participant.guid_prefix,
+            entity: self.eid,
+        };
+        self.participant
+            .dispatch_to_readers(source, Some(&self.topic), payload.to_vec(), Utc::now(), seq)
+            .await;
+
+        for locator in self
+            .participant
+            .sedp
+            .matched_reader_locators(&self.topic)
+            .await
+        {
+            if let Some(addr) = locator.udp_addr() {
+                let _ = self.participant.data_socket.send_to(&msg, addr).await;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RtpsReader
+// ---------------------------------------------------------------------------
+
+/// A registered local reader's lifecycle handle. Created by
+/// [`RtpsParticipant::new_reader`] alongside the [`SampleReceiver`] used to
+/// actually consume samples. Matches the non-channel half of go-DDS's
+/// `rtpsReader` (`Unsubscribe`).
+pub struct RtpsReader {
+    participant: Arc<RtpsParticipant>,
+    eid: EntityId,
+}
+
+impl RtpsReader {
+    /// This reader's `EntityId`.
+    pub fn entity_id(&self) -> EntityId {
+        self.eid
+    }
+
+    /// Removes this reader from the participant's dispatch table. Matches
+    /// go-DDS's `rtpsReader.Unsubscribe`. The `SampleReceiver` returned
+    /// alongside this handle remains usable (any already-queued samples
+    /// can still be drained) but receives nothing further.
+    //fusa:req REQ-RTPS-041
+    pub async fn unsubscribe(&self) {
+        self.participant.remove_reader(self.eid).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::relay::BackPressurePolicy;
+    use crate::rtps::locator::Locator;
+    use crate::rtps::message::VENDOR_ID_RUST_DDS;
+    use crate::rtps::spdp::SpdpConfig;
+    use crate::rtps::spdp::SpdpService;
+
+    fn ascending_prefix() -> GuidPrefix {
+        let mut b = [0u8; 12];
+        for (i, v) in b.iter_mut().enumerate() {
+            *v = (i + 1) as u8; // safe: i in [0,11], (i+1) in [1,12] fits u8
+        }
+        GuidPrefix(b)
+    }
+
+    fn other_prefix() -> GuidPrefix {
+        let mut p = ascending_prefix();
+        p.0[0] = 0xFF;
+        p
+    }
+
+    async fn bound_socket() -> Arc<RtpsSocket> {
+        Arc::new(RtpsSocket::bind_unicast_v4(0).await.unwrap())
+    }
+
+    /// Builds a standalone (no real peers) `RtpsParticipant` for tests that
+    /// only exercise local-delivery/dispatch logic.
+    async fn lone_participant(prefix: GuidPrefix) -> Arc<RtpsParticipant> {
+        let send_socket = bound_socket().await;
+        let spdp = SpdpService::new(
+            SpdpConfig::new(0, prefix, 17410, 17411),
+            Arc::clone(&send_socket),
+        );
+        let sedp = SedpService::new(
+            super::super::sedp::SedpConfig::new(prefix, 17411),
+            Arc::clone(&send_socket),
+            spdp,
+        );
+        RtpsParticipant::new(prefix, VENDOR_ID_RUST_DDS, send_socket, sedp)
+    }
+
+    //fusa:test REQ-RTPS-037
+    #[test]
+    fn write_wire_message_matches_go_dds_reference() {
+        // Exercises the exact composition write() performs
+        // (wrap_payload -> encode_data_submessage -> wrap_in_rtps_message)
+        // synchronously, at the field level, against the go-DDS reference
+        // values documented in RtpsWriter::write's doc comment.
+        let prefix = ascending_prefix();
+        let writer_eid = entity_id_for_writer(1);
+        let payload = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
+
+        let wrapped = wrap_payload(&payload);
+        assert_eq!(hex::encode(&wrapped), "01000000deadbeef0102");
+
+        let submsg = encode_data_submessage(
+            writer_eid,
+            ENTITYID_UNKNOWN,
+            SequenceNumber { high: 0, low: 1 },
+            &wrapped,
+        );
+        assert_eq!(
+            hex::encode(&submsg),
+            "15051e00000010000000000000000103000000000100000001000000deadbeef0102"
+        );
+
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: VendorId([0x01, 0x27]), // go-DDS's own vendor id, for byte-exact parity
+            guid_prefix: prefix,
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+        assert_eq!(msg.len(), 54);
+        assert_eq!(
+            hex::encode(&msg),
+            "52545053020301270102030405060708090a0b0c15051e00000010000000000000000103000000000100000001000000deadbeef0102"
+        );
+    }
+
+    //fusa:test REQ-RTPS-041
+    #[tokio::test]
+    async fn new_writer_and_new_reader_assign_distinct_entity_ids() {
+        let p = lone_participant(ascending_prefix()).await;
+        let w1 = p.new_writer("Square").await;
+        let w2 = p.new_writer("Circle").await;
+        assert_eq!(w1.entity_id(), entity_id_for_writer(1));
+        assert_eq!(w2.entity_id(), entity_id_for_writer(2));
+
+        let (_rx, r1) = p.new_reader("Square", SubscriberOptions::default()).await;
+        assert_eq!(r1.entity_id(), entity_id_for_reader(3));
+    }
+
+    //fusa:test REQ-RTPS-038
+    #[tokio::test]
+    async fn local_write_delivers_to_local_reader_on_same_topic() {
+        let p = lone_participant(ascending_prefix()).await;
+        let (rx, _reader) = p.new_reader("Square", SubscriberOptions::default()).await;
+        let writer = p.new_writer("Square").await;
+
+        writer.write(b"hello").await.unwrap();
+
+        let sample = rx.try_recv().expect("expected a delivered sample");
+        assert_eq!(sample.topic, "Square");
+        assert_eq!(sample.payload, b"hello");
+        assert_eq!(sample.sequence_number, 1);
+        assert_eq!(p.delivers(), 1);
+        assert_eq!(p.drops(), 0);
+    }
+
+    //fusa:test REQ-RTPS-038
+    #[tokio::test]
+    async fn local_write_does_not_deliver_to_reader_on_different_topic() {
+        let p = lone_participant(ascending_prefix()).await;
+        let (rx, _reader) = p.new_reader("Circle", SubscriberOptions::default()).await;
+        let writer = p.new_writer("Square").await;
+
+        writer.write(b"hello").await.unwrap();
+
+        assert!(rx.try_recv().is_none());
+        assert_eq!(p.delivers(), 0);
+    }
+
+    //fusa:test REQ-RTPS-041
+    #[tokio::test]
+    async fn unsubscribe_stops_further_local_delivery() {
+        let p = lone_participant(ascending_prefix()).await;
+        let (rx, reader) = p.new_reader("Square", SubscriberOptions::default()).await;
+        let writer = p.new_writer("Square").await;
+
+        writer.write(b"first").await.unwrap();
+        assert!(rx.try_recv().is_some());
+
+        reader.unsubscribe().await;
+        writer.write(b"second").await.unwrap();
+        assert!(rx.try_recv().is_none());
+    }
+
+    //fusa:test REQ-RTPS-038
+    #[tokio::test]
+    async fn dispatch_applies_drop_newest_back_pressure() {
+        let p = lone_participant(ascending_prefix()).await;
+        let opts = SubscriberOptions {
+            channel_depth: 1,
+            back_pressure: BackPressurePolicy::DropNewest,
+            topic: None,
+        };
+        let (rx, _reader) = p.new_reader("Square", opts).await;
+        let writer = p.new_writer("Square").await;
+
+        writer.write(b"first").await.unwrap();
+        writer.write(b"second").await.unwrap(); // dropped: queue already full
+
+        assert_eq!(p.delivers(), 1);
+        assert_eq!(p.drops(), 1);
+        let sample = rx.try_recv().unwrap();
+        assert_eq!(sample.payload, b"first");
+        assert!(rx.try_recv().is_none());
+    }
+
+    //fusa:test REQ-RTPS-038
+    //fusa:test REQ-RTPS-009
+    #[tokio::test]
+    async fn handle_data_packet_ignores_own_and_malformed_input_without_panicking() {
+        let p = lone_participant(ascending_prefix()).await;
+        let (rx, _reader) = p.new_reader("Square", SubscriberOptions::default()).await;
+
+        // Malformed: too short to even have a header.
+        p.handle_data_packet(b"short").await;
+        assert!(rx.try_recv().is_none());
+
+        // Well-formed, but from this same participant's own GuidPrefix —
+        // self-filtered like SPDP/SEDP.
+        let writer_eid = entity_id_for_writer(1);
+        let wrapped = wrap_payload(b"hello");
+        let submsg = encode_data_submessage(
+            writer_eid,
+            ENTITYID_UNKNOWN,
+            SequenceNumber { high: 0, low: 1 },
+            &wrapped,
+        );
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: VENDOR_ID_RUST_DDS,
+            guid_prefix: ascending_prefix(), // == p's own prefix
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+        p.handle_data_packet(&msg).await;
+        assert!(rx.try_recv().is_none());
+    }
+
+    // ── Real two-participant round trip over loopback UDP ────────────────
+    //
+    // Builds two independent RtpsParticipants (A, B), each with its own
+    // real SpdpService/SedpService/data socket bound to an ephemeral
+    // loopback port, and drives SPDP discovery + SEDP matching + a
+    // BestEffort DATA send exactly as two separate rust-DDS processes
+    // would communicate: A registers a writer, B registers a reader
+    // *before* A's writer even exists (matching go-DDS's asynchronous
+    // "writer discovered later" case, exercising
+    // RtpsParticipant::spawn_sedp_match_listener), and the sample must
+    // arrive at B purely via the network path (real UDP datagrams, real
+    // wire decode) — not the local in-process dispatch path.
+
+    struct Peer {
+        participant: Arc<RtpsParticipant>,
+        spdp: Arc<SpdpService>,
+        _sedp_recv: JoinHandle<()>,
+        _data_recv: JoinHandle<()>,
+        _match_listener: JoinHandle<()>,
+    }
+
+    async fn spawn_peer(prefix: GuidPrefix) -> Peer {
+        let meta_socket = Arc::new(RtpsSocket::bind_unicast_v4(0).await.unwrap());
+        let data_socket = Arc::new(RtpsSocket::bind_unicast_v4(0).await.unwrap());
+        let meta_port = meta_socket.local_port();
+        let data_port = data_socket.local_port();
+
+        let spdp = SpdpService::new(
+            SpdpConfig::new(0, prefix, meta_port, data_port),
+            Arc::clone(&meta_socket),
+        );
+        let sedp = SedpService::new(
+            super::super::sedp::SedpConfig::new(prefix, data_port),
+            Arc::clone(&meta_socket),
+            Arc::clone(&spdp),
+        );
+
+        let (meta_rx, _meta_recv_handle) = meta_socket.spawn_receive_loop(64);
+        let sedp_recv = Arc::clone(&sedp).spawn_receive_loop(meta_rx);
+
+        let participant = RtpsParticipant::new(
+            prefix,
+            VENDOR_ID_RUST_DDS,
+            Arc::clone(&data_socket),
+            Arc::clone(&sedp),
+        );
+        let match_listener = participant.clone().spawn_sedp_match_listener().await;
+
+        let (data_rx, _data_recv_handle) = data_socket.spawn_receive_loop(64);
+        let data_recv = Arc::clone(&participant).spawn_receive_loop(data_rx);
+
+        Peer {
+            participant,
+            spdp,
+            _sedp_recv: sedp_recv,
+            _data_recv: data_recv,
+            _match_listener: match_listener,
+        }
+    }
+
+    fn proxy_from(
+        spdp: &SpdpService,
+        prefix: GuidPrefix,
+        meta_port: u16,
+    ) -> super::super::spdp::ParticipantProxy {
+        use super::super::guid::ENTITYID_PARTICIPANT;
+        let _ = spdp; // silence unused-parameter warnings in case fields shrink later
+        super::super::spdp::ParticipantProxy {
+            guid: Guid {
+                prefix,
+                entity: ENTITYID_PARTICIPANT,
+            },
+            metatraffic_unicast: Locator::udp_v4([127, 0, 0, 1], u32::from(meta_port)),
+            default_unicast: Locator::default(),
+            builtin_endpoints: 0,
+            lease_duration: std::time::Duration::from_secs(30),
+            last_seen: None,
+        }
+    }
+
+    //fusa:test REQ-RTPS-037
+    //fusa:test REQ-RTPS-038
+    //fusa:test REQ-RTPS-039
+    //fusa:test REQ-RTPS-040
+    #[tokio::test]
+    async fn two_participant_besteffort_round_trip_over_real_udp() {
+        let prefix_a = ascending_prefix();
+        let prefix_b = other_prefix();
+
+        let a = spawn_peer(prefix_a).await;
+        let b = spawn_peer(prefix_b).await;
+
+        // b registers its reader first — a's writer (and SEDP publication
+        // announcement) does not exist yet, so this exercises the
+        // asynchronous spawn_sedp_match_listener path, not new_reader's
+        // synchronous match.
+        let (rx_b, _reader_b) = b
+            .participant
+            .new_reader("Square", SubscriberOptions::default())
+            .await;
+        let writer_a = a.participant.new_writer("Square").await;
+
+        // Simulates what a real SpdpService discovery round would trigger
+        // via RtpsParticipant::spawn_spdp_peer_listener once both sides'
+        // announce/receive loops are running (see
+        // spdp_peer_listener_bridges_discovery_to_sedp_announcement below
+        // for that bridge exercised end-to-end over real multicast) —
+        // `SedpService::on_new_peer` itself needs only the peer's proxy, not
+        // a populated SPDP known-peers table, so this is a faithful,
+        // hermetic stand-in. Called *after* both endpoints are registered
+        // so each side has something to announce to the other, matching
+        // go-DDS's own `onNewPeer`, which always announces the *current*
+        // set of local endpoints at call time.
+        let proxy_b = proxy_from(&b.spdp, prefix_b, b.spdp.config().meta_unicast_port);
+        let proxy_a = proxy_from(&a.spdp, prefix_a, a.spdp.config().meta_unicast_port);
+        a.participant.sedp.on_new_peer(&proxy_b).await;
+        b.participant.sedp.on_new_peer(&proxy_a).await;
+
+        // Give the SEDP announcement + this test's match-listener task time
+        // to land before writing. `matched_reader_locators` is checked on
+        // *a*'s own SedpService — the same query `RtpsWriter::write` itself
+        // makes to resolve where to send — since it holds *b*'s reader as a
+        // remote endpoint once b's subscription announcement (sent above via
+        // `b.participant.sedp.on_new_peer(&proxy_a)`) has been received and
+        // processed by a's SEDP receive loop.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !a
+                    .participant
+                    .sedp
+                    .matched_reader_locators("Square")
+                    .await
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("SEDP endpoint match never landed on participant a");
+
+        writer_a.write(b"hello-from-a").await.unwrap();
+
+        let sample = tokio::time::timeout(std::time::Duration::from_secs(5), rx_b.recv())
+            .await
+            .expect("no sample received in time")
+            .expect("channel closed unexpectedly");
+        assert_eq!(sample.topic, "Square");
+        assert_eq!(sample.payload, b"hello-from-a");
+        assert_eq!(sample.sequence_number, 1);
+        let expected_writer_guid = Guid {
+            prefix: prefix_a,
+            entity: writer_a.entity_id(),
+        }
+        .to_bytes();
+        assert_eq!(sample.writer_guid, expected_writer_guid);
+    }
+
+    // ── SPDP → SEDP bridge (spawn_spdp_peer_listener) over real multicast ──
+
+    //fusa:test REQ-RTPS-042
+    #[tokio::test]
+    async fn spdp_peer_listener_bridges_discovery_to_sedp_announcement() {
+        // Picks an ephemeral, collision-free multicast port (rather than the
+        // real domain-formula SPDP port) for the same reason spdp.rs's own
+        // `send_announcement_reaches_a_real_multicast_listener` test does:
+        // hermetic against a real SPDP listener, or another parallel test,
+        // sharing this host. Skips (rather than fails) if this environment
+        // has no multicast-capable interface.
+        let mcast_port = RtpsSocket::bind_unicast_v4(0).await.unwrap().local_port();
+        let Ok(mcast_socket) =
+            RtpsSocket::bind_multicast_v4(super::super::transport::SPDP_MULTICAST_ADDR, mcast_port)
+                .await
+        else {
+            return;
+        };
+
+        let prefix_a = ascending_prefix();
+        let a = spawn_peer(prefix_a).await;
+        // Wire a's SpdpService into its RtpsParticipant's SEDP bridge, then
+        // feed a's SpdpService from the ephemeral multicast socket above —
+        // standing in for a's normal mcast-joined receive socket.
+        let peer_listener = a
+            .participant
+            .spawn_spdp_peer_listener(Arc::clone(&a.spdp))
+            .await;
+        let (mcast_rx, _mcast_recv_handle) = mcast_socket.spawn_receive_loop(8);
+        let spdp_recv = Arc::clone(&a.spdp).spawn_receive_loop(mcast_rx);
+
+        // a needs something to announce once it learns about the fake peer.
+        a.participant.new_writer("Square").await;
+
+        // A real socket standing in for a fake peer's metatraffic unicast
+        // port — same pattern as sedp.rs's own
+        // `on_new_peer_announces_local_endpoints_to_one_peer` test.
+        let fake_peer_meta = RtpsSocket::bind_unicast_v4(0).await.unwrap();
+        let fake_peer_meta_port = fake_peer_meta.local_port();
+        let (mut fake_peer_rx, fake_peer_recv_handle) = fake_peer_meta.spawn_receive_loop(8);
+
+        // Build and multicast a real SPDP ParticipantData announcement for
+        // the fake peer — real build_participant_data/encode_data_submessage/
+        // wrap_in_rtps_message, same primitives spdp.rs's own tests use.
+        let prefix_fake = other_prefix();
+        let fake_cfg = super::super::spdp::SpdpConfig::new(0, prefix_fake, fake_peer_meta_port, 0);
+        let payload = super::super::spdp::build_participant_data(&fake_cfg);
+        let submsg = encode_data_submessage(
+            super::super::guid::ENTITYID_SPDP_WRITER,
+            super::super::guid::ENTITYID_SPDP_READER,
+            SequenceNumber { high: 0, low: 1 },
+            &payload,
+        );
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: fake_cfg.vendor_id,
+            guid_prefix: prefix_fake,
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+        let sender = RtpsSocket::bind_unicast_v4(0).await.unwrap();
+        sender
+            .send_to(
+                &msg,
+                std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, mcast_port)),
+            )
+            .await
+            .unwrap();
+
+        // If the bridge works, a's SpdpService stores the fake peer, emits
+        // a ParticipantProxy event, spawn_spdp_peer_listener forwards it into
+        // a.sedp.on_new_peer, which announces a's "Square" writer directly
+        // to the fake peer's meta port.
+        let datagram = tokio::time::timeout(std::time::Duration::from_secs(5), fake_peer_rx.recv())
+            .await
+            .expect("fake peer never received a SEDP announcement")
+            .expect("channel closed unexpectedly");
+        assert_eq!(&datagram.data[0..4], b"RTPS");
+        let recv_header = Header::decode(&datagram.data).unwrap();
+        assert_eq!(recv_header.guid_prefix, prefix_a);
+
+        peer_listener.abort();
+        spdp_recv.abort();
+        fake_peer_recv_handle.abort();
+    }
+}

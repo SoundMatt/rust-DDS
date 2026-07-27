@@ -23,26 +23,33 @@
 //! path"), the `EndpointPlugin`/`DiscoveryPlugin` authentication hook
 //! (`PID_ENDPOINT_TOKEN`), and the participant-liveliness callback.
 //!
-//! # No RTPS participant runtime yet
+//! # No RTPS participant runtime yet (as of this module's own sub-phase)
 //!
 //! go-DDS's `sedpService` holds a `*participant` and reaches into its
 //! `rtpsReader`/`rtpsWriter` bookkeeping (`s.p.readerByEID(...).addSourceGUID`,
 //! `s.p.addWriterLocator`) and its sibling `spdpService` (`s.p.spdp.allPeers()`)
-//! directly. rust-DDS has no equivalent RTPS participant runtime type yet
-//! (that composition lands with sub-phase 6, "BestEffort data path", which is
-//! where reader/writer objects and their receive-side dispatch are built) —
-//! so [`SedpService`] holds an [`Arc<SpdpService>`](super::spdp::SpdpService)
-//! directly (the one piece of that composition sub-phase 4 already provides)
-//! and, in place of notifying a reader object in-line,
-//! [`SedpService::on_remote_writer`] *returns* the matched local reader
-//! `EntityId`s and [`SedpService::register_reader`] *returns* the matched
-//! remote writer `Guid`s for a future caller to act on. The endpoint tables
-//! themselves ([`SedpService::known_remote_writers`],
-//! [`SedpService::known_remote_readers`],
+//! directly. At the time this module was written (sub-phase 5), rust-DDS had
+//! no equivalent RTPS participant runtime type yet — so [`SedpService`] holds
+//! an [`Arc<SpdpService>`](super::spdp::SpdpService) directly (the one piece
+//! of that composition sub-phase 4 already provides) and, in place of
+//! notifying a reader object in-line, [`SedpService::on_remote_writer`]
+//! *returns* the matched local reader `EntityId`s and
+//! [`SedpService::register_reader`] *returns* the matched remote writer
+//! `Guid`s for a future caller to act on. The endpoint tables themselves
+//! ([`SedpService::known_remote_writers`], [`SedpService::known_remote_readers`],
 //! [`SedpService::matched_writer_locator`],
 //! [`SedpService::matched_reader_locators`]) are otherwise the same shape as
 //! go-DDS's `remoteWriters`/`remoteReaders`/`remoteReaderLocs`/
 //! `p.writerLocators`, so that future caller has everything it needs.
+//!
+//! Sub-phase 6 ("BestEffort data path", `super::participant`) is that future
+//! caller: `RtpsParticipant::new_reader` consumes `register_reader`'s
+//! synchronous return value directly, and
+//! [`SedpService::set_match_listener`]/[`WriterMatch`] cover the
+//! asynchronous case (a remote writer discovered *after* the local reader
+//! was already registered) that `on_remote_writer`'s return value alone
+//! cannot reach, since `on_remote_writer` is only ever called from this
+//! module's own private [`SedpService::handle_packet`] receive loop.
 //!
 //! # Async model
 //!
@@ -119,6 +126,26 @@ pub struct EndpointInfo {
     pub guid: Guid,
     pub topic_name: String,
     pub is_writer: bool,
+}
+
+// ---------------------------------------------------------------------------
+// WriterMatch — sub-phase 6's "future caller" hook
+// ---------------------------------------------------------------------------
+
+/// Emitted by [`SedpService::on_remote_writer`] when a SEDP receive loop
+/// discovers a remote writer that matches an *already-registered* local
+/// reader's topic. Consumed by sub-phase 6
+/// (`super::participant::RtpsParticipant::spawn_sedp_match_listener`) to
+/// keep a reader's accepted-writer-GUID set in sync with SEDP's own
+/// matching after registration time — the asynchronous counterpart to
+/// [`SedpService::register_reader`]'s synchronous return value, which only
+/// covers writers already known *at* registration time. See
+/// [`SedpService::set_match_listener`].
+//fusa:req REQ-RTPS-039
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriterMatch {
+    pub reader_eid: EntityId,
+    pub writer_guid: Guid,
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +256,8 @@ pub struct SedpService {
     /// `participant.writerLocators` — kept here rather than on a
     /// participant type since none exists yet (see the module docs).
     writer_locators: RwLock<HashMap<Guid, Locator>>,
+    /// Set via [`SedpService::set_match_listener`]; see [`WriterMatch`].
+    match_listener: RwLock<Option<mpsc::UnboundedSender<WriterMatch>>>,
     endpoint_matches: AtomicU64,
     announces_sent: AtomicU64,
     announces_received: AtomicU64,
@@ -259,6 +288,7 @@ impl SedpService {
             remote_readers: RwLock::new(HashMap::new()),
             remote_reader_locators: RwLock::new(HashMap::new()),
             writer_locators: RwLock::new(HashMap::new()),
+            match_listener: RwLock::new(None),
             endpoint_matches: AtomicU64::new(0),
             announces_sent: AtomicU64::new(0),
             announces_received: AtomicU64::new(0),
@@ -268,6 +298,17 @@ impl SedpService {
     /// This service's configuration.
     pub fn config(&self) -> &SedpConfig {
         &self.config
+    }
+
+    /// Registers `tx` to receive a [`WriterMatch`] event every time
+    /// [`SedpService::on_remote_writer`] matches a newly-discovered remote
+    /// writer against an already-registered local reader's topic. At most
+    /// one listener is kept; a later call replaces an earlier one. See
+    /// [`WriterMatch`]'s docs for why this exists (sub-phase 6's runtime
+    /// participant type is the intended caller).
+    //fusa:req REQ-RTPS-039
+    pub async fn set_match_listener(&self, tx: mpsc::UnboundedSender<WriterMatch>) {
+        *self.match_listener.write().await = Some(tx);
     }
 
     fn next_seq_num(&self) -> u32 {
@@ -561,6 +602,17 @@ impl SedpService {
                 .write()
                 .await
                 .insert(guid, data_locator);
+            if let Some(tx) = self.match_listener.read().await.as_ref() {
+                for reader_eid in &matched {
+                    // A closed receiver just means no one is listening yet
+                    // (or the listener task has been torn down); dropping
+                    // the event is fine — never treated as an error here.
+                    let _ = tx.send(WriterMatch {
+                        reader_eid: *reader_eid,
+                        writer_guid: guid,
+                    });
+                }
+            }
         }
         matched
     }

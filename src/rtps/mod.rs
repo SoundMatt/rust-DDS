@@ -17,9 +17,15 @@
 //! (sub-phase 5, "SEDP") is the unicast counterpart: once `spdp` has found a
 //! remote participant, `sedp` exchanges publication/subscription
 //! announcements with it and matches local/remote endpoints by topic name.
-//! Later sub-phases follow the same layering. This module tree is
-//! internal: it is **not** re-exported from the crate root and is **not**
-//! wired into the public `Participant`/`Publisher`/`Subscriber` API yet.
+//! `participant` (sub-phase 6, "BestEffort data path") is the first module
+//! with an actual RTPS participant runtime type: it owns
+//! `rtpsReader`/`rtpsWriter`-shaped local endpoint bookkeeping, wires
+//! `sedp`'s endpoint-matching output into it, and performs real BestEffort
+//! DATA submessage encode/decode/dispatch over `transport`'s sockets — real
+//! end-to-end sample delivery, not just discovery. Later sub-phases follow
+//! the same layering. This module tree is internal: it is **not**
+//! re-exported from the crate root and is **not** wired into the public
+//! `Participant`/`Publisher`/`Subscriber` API yet.
 //!
 //! Byte layout for every type here is derived from go-DDS's `rtps` package
 //! (`github.com/SoundMatt/go-DDS`, RTPS 2.3), which the roadmap designates
@@ -38,6 +44,7 @@ pub mod cdr;
 pub mod guid;
 pub mod locator;
 pub mod message;
+pub mod participant;
 pub mod sedp;
 pub mod spdp;
 pub mod transport;
