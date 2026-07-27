@@ -64,8 +64,7 @@ impl GuidPrefix {
 /// internal test in this module tree instead uses a fixed prefix (see
 /// `participant.rs::tests::ascending_prefix`), since deterministic test
 /// output matters more there than realistic identity assignment.
-//fusa:req REQ-GUID-001
-//fusa:req REQ-GUID-002
+//fusa:req REQ-RTPS-001
 pub(crate) fn random_guid_prefix() -> GuidPrefix {
     let mut bytes = [0u8; 12];
     let random_part: [u8; 8] = rand::random();
@@ -230,8 +229,7 @@ pub fn entity_id_for_reader(n: u32) -> EntityId {
 mod tests {
     use super::*;
 
-    //fusa:test REQ-GUID-001
-    //fusa:test REQ-GUID-002
+    //fusa:test REQ-RTPS-001
     #[test]
     fn random_guid_prefix_embeds_this_process_pid_and_varies() {
         let a = random_guid_prefix();
