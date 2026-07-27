@@ -103,17 +103,20 @@ impl relay::Node for DdsNode {
             return Err(relay::Error::Closed);
         }
         let depth = opts.chan_depth(64);
+        let policy = opts.back_pressure;
         //fusa:req REQ-RELAY-003
         let topic = opts.topic.ok_or(relay::Error::NotConnected)?;
-        let qos = QoS {
+        // Channel depth / back-pressure are §14 channel options, not QoS (§8.2) —
+        // pass them via SubscriberOptions, not folded into QoS.
+        let sub_opts = SubscriberOptions {
             channel_depth: depth,
-            back_pressure: opts.back_pressure,
-            ..QoS::default()
+            back_pressure: policy,
+            topic: None,
         };
 
         let (rx, sub) = self
             .participant
-            .new_subscriber(&topic, qos)
+            .new_subscriber(&topic, QoS::default(), sub_opts)
             .await
             .map_err(|e| e.as_relay().unwrap_or(relay::Error::NotConnected))?;
 
@@ -130,7 +133,6 @@ impl relay::Node for DdsNode {
         // not possible with a standard mpsc channel; the DDS subscription already
         // applies DropOldest to the upstream queue so burst behaviour is correct.
         //fusa:req REQ-SEC-012
-        let policy = opts.back_pressure;
         tokio::spawn(async move {
             let _sub = sub;
             while let Some(sample) = rx.recv().await {

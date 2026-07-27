@@ -16,7 +16,7 @@
 - [x] `adapt()` — wraps any `Participant` as a `relay::Node` per RELAY §10.3
 - [x] `Sample::to_message()` / `Sample::from_message()` round-trip per §15.7.2
 - [x] `relay::Node::subscribe()` requires topic via `relay::with_topic()`
-- [x] `RELAY_SPEC_VERSION = "1.7"`
+- [x] `RELAY_SPEC_VERSION` — tracks the crate's current RELAY spec conformance (source of truth: `rust_dds::RELAY_SPEC_VERSION` / `rust-dds version --format json`)
 - [x] CLI binary: `version`, `capabilities`, `status`
 - [x] 37 passing tests; CI on ubuntu/macos/windows × Rust 1.75/stable
 - [x] DCO enforced in CI

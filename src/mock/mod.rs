@@ -20,7 +20,7 @@ use chrono::Utc;
 
 use crate::error::Error;
 use crate::participant::{Participant, Publisher, SampleReceiver, SubInner, Subscriber};
-use crate::relay::Context;
+use crate::relay::{Context, SubscriberOptions};
 
 type WriteLog = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 use crate::types::{validate_domain, Domain, DurabilityKind, Guid, QoS, Sample};
@@ -89,13 +89,9 @@ impl Broker {
 
     //fusa:req REQ-MEM-002
     //fusa:req REQ-SEC-009
-    fn subscribe(&self, topic: &str, qos: &QoS) -> Arc<SubInner> {
-        let depth = if qos.channel_depth > 0 {
-            qos.channel_depth
-        } else {
-            64
-        };
-        let inner = Arc::new(SubInner::new(depth, qos.back_pressure));
+    fn subscribe(&self, topic: &str, qos: &QoS, opts: &SubscriberOptions) -> Arc<SubInner> {
+        let depth = opts.chan_depth(64);
+        let inner = Arc::new(SubInner::new(depth, opts.back_pressure));
 
         let mut topics = self.topics.lock().unwrap();
         let state = topics
@@ -132,6 +128,11 @@ impl Publisher for MockPublisher {
     async fn write(&self, payload: Vec<u8>) -> Result<(), Error> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::Closed);
+        }
+        // §16: DDS payload limit is QoS.MaxSampleSize (0 = unlimited).
+        //fusa:req REQ-SEC-002
+        if self.qos.max_sample_size > 0 && payload.len() > self.qos.max_sample_size as usize {
+            return Err(Error::PayloadTooLarge);
         }
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let sample = Sample {
@@ -289,6 +290,7 @@ impl Participant for MockParticipant {
         &self,
         topic: &str,
         qos: QoS,
+        opts: SubscriberOptions,
     ) -> Result<(SampleReceiver, Box<dyn Subscriber>), Error> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::Closed);
@@ -296,7 +298,7 @@ impl Participant for MockParticipant {
         if topic.is_empty() {
             return Err(Error::TopicEmpty);
         }
-        let inner = self.broker.subscribe(topic, &qos);
+        let inner = self.broker.subscribe(topic, &qos, &opts);
         let receiver = SampleReceiver {
             inner: inner.clone(),
         };
@@ -377,7 +379,7 @@ mod tests {
     async fn basic_pubsub() {
         let p = MockParticipant::new(Domain(0)).unwrap();
         let (rx, _sub) = p
-            .new_subscriber("sensors/temp", QoS::default())
+            .new_subscriber("sensors/temp", QoS::default(), SubscriberOptions::default())
             .await
             .unwrap();
         let pub_ = p
@@ -400,8 +402,14 @@ mod tests {
     #[tokio::test]
     async fn multiple_subscribers_receive_same_sample() {
         let p = MockParticipant::new(Domain(0)).unwrap();
-        let (rx1, _) = p.new_subscriber("t/x", QoS::default()).await.unwrap();
-        let (rx2, _) = p.new_subscriber("t/x", QoS::default()).await.unwrap();
+        let (rx1, _) = p
+            .new_subscriber("t/x", QoS::default(), SubscriberOptions::default())
+            .await
+            .unwrap();
+        let (rx2, _) = p
+            .new_subscriber("t/x", QoS::default(), SubscriberOptions::default())
+            .await
+            .unwrap();
         let pub_ = p.new_publisher("t/x", QoS::default()).await.unwrap();
 
         pub_.write(b"broadcast".to_vec()).await.unwrap();
@@ -429,7 +437,11 @@ mod tests {
         pub_.write(b"cached-value".to_vec()).await.unwrap();
 
         let (rx, _) = p
-            .new_subscriber("t/cached", crate::types::RELIABLE_QOS.clone())
+            .new_subscriber(
+                "t/cached",
+                crate::types::RELIABLE_QOS.clone(),
+                SubscriberOptions::default(),
+            )
             .await
             .unwrap();
         let sample = tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -465,7 +477,8 @@ mod tests {
             Err(Error::TopicEmpty)
         ));
         assert!(matches!(
-            p.new_subscriber("", QoS::default()).await,
+            p.new_subscriber("", QoS::default(), SubscriberOptions::default())
+                .await,
             Err(Error::TopicEmpty)
         ));
     }
@@ -512,7 +525,10 @@ mod tests {
     #[tokio::test]
     async fn try_recv_non_blocking() {
         let p = MockParticipant::new(Domain(0)).unwrap();
-        let (rx, _) = p.new_subscriber("t", QoS::default()).await.unwrap();
+        let (rx, _) = p
+            .new_subscriber("t", QoS::default(), SubscriberOptions::default())
+            .await
+            .unwrap();
         assert!(rx.try_recv().is_none());
         let pub_ = p.new_publisher("t", QoS::default()).await.unwrap();
         pub_.write(b"val".to_vec()).await.unwrap();
@@ -524,7 +540,10 @@ mod tests {
     #[tokio::test]
     async fn unsubscribe_stops_delivery() {
         let p = MockParticipant::new(Domain(0)).unwrap();
-        let (rx, sub) = p.new_subscriber("t/u", QoS::default()).await.unwrap();
+        let (rx, sub) = p
+            .new_subscriber("t/u", QoS::default(), SubscriberOptions::default())
+            .await
+            .unwrap();
         sub.unsubscribe();
         let pub_ = p.new_publisher("t/u", QoS::default()).await.unwrap();
         pub_.write(b"after-unsub".to_vec()).await.unwrap();
@@ -539,7 +558,7 @@ mod tests {
         // §6.4: recv() MUST return None after unsubscribe, not block forever.
         let p = MockParticipant::new(Domain(0)).unwrap();
         let (rx, sub) = p
-            .new_subscriber("t/unsub-recv", QoS::default())
+            .new_subscriber("t/unsub-recv", QoS::default(), SubscriberOptions::default())
             .await
             .unwrap();
         sub.unsubscribe();
@@ -561,7 +580,10 @@ mod tests {
     #[tokio::test]
     async fn sequence_numbers_monotonic() {
         let p = MockParticipant::new(Domain(0)).unwrap();
-        let (rx, _) = p.new_subscriber("t/seq", QoS::default()).await.unwrap();
+        let (rx, _) = p
+            .new_subscriber("t/seq", QoS::default(), SubscriberOptions::default())
+            .await
+            .unwrap();
         let pub_ = p.new_publisher("t/seq", QoS::default()).await.unwrap();
         for _ in 0..3 {
             pub_.write(b"x".to_vec()).await.unwrap();
@@ -617,13 +639,16 @@ mod tests {
     async fn drop_oldest_makes_room() {
         use crate::relay::BackPressurePolicy;
         let p = MockParticipant::new(Domain(0)).unwrap();
-        let qos = QoS {
+        let opts = SubscriberOptions {
             channel_depth: 2,
             back_pressure: BackPressurePolicy::DropOldest,
-            ..QoS::default()
+            ..SubscriberOptions::default()
         };
-        let (rx, _) = p.new_subscriber("t/drop", qos.clone()).await.unwrap();
-        let pub_ = p.new_publisher("t/drop", qos).await.unwrap();
+        let (rx, _) = p
+            .new_subscriber("t/drop", QoS::default(), opts)
+            .await
+            .unwrap();
+        let pub_ = p.new_publisher("t/drop", QoS::default()).await.unwrap();
         pub_.write(b"a".to_vec()).await.unwrap();
         pub_.write(b"b".to_vec()).await.unwrap();
         // third write: queue full, oldest ("a") is dropped
@@ -646,13 +671,16 @@ mod tests {
     async fn drop_newest_does_not_exceed_capacity() {
         use crate::relay::BackPressurePolicy;
         let p = MockParticipant::new(Domain(0)).unwrap();
-        let qos = QoS {
+        let opts = SubscriberOptions {
             channel_depth: 2,
             back_pressure: BackPressurePolicy::DropNewest,
-            ..QoS::default()
+            ..SubscriberOptions::default()
         };
-        let (rx, _) = p.new_subscriber("t/cap", qos.clone()).await.unwrap();
-        let pub_ = p.new_publisher("t/cap", qos).await.unwrap();
+        let (rx, _) = p
+            .new_subscriber("t/cap", QoS::default(), opts)
+            .await
+            .unwrap();
+        let pub_ = p.new_publisher("t/cap", QoS::default()).await.unwrap();
         pub_.write(b"a".to_vec()).await.unwrap();
         pub_.write(b"b".to_vec()).await.unwrap();
         pub_.write(b"c".to_vec()).await.unwrap(); // dropped — queue full
@@ -673,6 +701,36 @@ mod tests {
         assert_send_sync::<MockParticipant>();
     }
 
+    //fusa:test REQ-SEC-002
+    #[tokio::test]
+    async fn write_oversized_payload_returns_payload_too_large() {
+        // §16: DDS payload limit is QoS.MaxSampleSize (0 = unlimited); exceeding
+        // it MUST return the mandatory ErrPayloadTooLarge sentinel (§5.1/§5.3).
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let qos = QoS {
+            max_sample_size: 4,
+            ..QoS::default()
+        };
+        let pub_ = p.new_publisher("t/max-size", qos).await.unwrap();
+        assert!(matches!(
+            pub_.write(vec![0u8; 5]).await,
+            Err(Error::PayloadTooLarge)
+        ));
+        // exactly at the limit is accepted
+        assert!(pub_.write(vec![0u8; 4]).await.is_ok());
+    }
+
+    //fusa:test REQ-SEC-002
+    #[tokio::test]
+    async fn write_max_sample_size_zero_is_unlimited() {
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let pub_ = p
+            .new_publisher("t/unlimited", QoS::default())
+            .await
+            .unwrap();
+        assert!(pub_.write(vec![0u8; 10_000]).await.is_ok());
+    }
+
     //fusa:test REQ-ASIL-002
     //fusa:test REQ-ASIL-009
     //fusa:test REQ-MEM-001
@@ -691,7 +749,7 @@ mod tests {
         // REQ-HAZ-002: payload delivered byte-for-byte identical from publisher to subscriber.
         let p = MockParticipant::new(Domain(0)).unwrap();
         let (rx, _) = p
-            .new_subscriber("t/integrity", QoS::default())
+            .new_subscriber("t/integrity", QoS::default(), SubscriberOptions::default())
             .await
             .unwrap();
         let pub_ = p
@@ -716,8 +774,14 @@ mod tests {
     async fn topic_isolation_no_cross_delivery() {
         // REQ-HAZ-003: sample published on topic A must not appear on subscriber for topic B.
         let p = MockParticipant::new(Domain(0)).unwrap();
-        let (rx_a, _) = p.new_subscriber("t/topic-a", QoS::default()).await.unwrap();
-        let (rx_b, _) = p.new_subscriber("t/topic-b", QoS::default()).await.unwrap();
+        let (rx_a, _) = p
+            .new_subscriber("t/topic-a", QoS::default(), SubscriberOptions::default())
+            .await
+            .unwrap();
+        let (rx_b, _) = p
+            .new_subscriber("t/topic-b", QoS::default(), SubscriberOptions::default())
+            .await
+            .unwrap();
         let pub_a = p.new_publisher("t/topic-a", QoS::default()).await.unwrap();
         pub_a.write(b"for-a-only".to_vec()).await.unwrap();
         // topic-a subscriber receives it
@@ -741,7 +805,11 @@ mod tests {
         let p0 = MockParticipant::new(Domain(0)).unwrap();
         let p1 = MockParticipant::new(Domain(1)).unwrap();
         let (rx1, _) = p1
-            .new_subscriber("t/shared-topic", QoS::default())
+            .new_subscriber(
+                "t/shared-topic",
+                QoS::default(),
+                SubscriberOptions::default(),
+            )
             .await
             .unwrap();
         let pub0 = p0
@@ -800,7 +868,8 @@ mod tests {
             Err(Error::Closed)
         ));
         assert!(matches!(
-            p.new_subscriber("t", QoS::default()).await,
+            p.new_subscriber("t", QoS::default(), SubscriberOptions::default())
+                .await,
             Err(Error::Closed)
         ));
     }
@@ -814,7 +883,10 @@ mod tests {
         let pub_ = p.new_publisher("t/conc", QoS::default()).await.unwrap();
         let mut receivers = Vec::new();
         for _ in 0..4 {
-            let (rx, _) = p.new_subscriber("t/conc", QoS::default()).await.unwrap();
+            let (rx, _) = p
+                .new_subscriber("t/conc", QoS::default(), SubscriberOptions::default())
+                .await
+                .unwrap();
             receivers.push(rx);
         }
         // Write 8 samples from the same async task (exercises single-lock protocol)
@@ -843,7 +915,8 @@ mod tests {
         ));
         // empty topic — subscriber
         assert!(matches!(
-            p.new_subscriber("", QoS::default()).await,
+            p.new_subscriber("", QoS::default(), SubscriberOptions::default())
+                .await,
             Err(Error::TopicEmpty)
         ));
         // domain out of range — low
@@ -867,7 +940,10 @@ mod tests {
             Err(Error::Closed)
         ));
         // recv after unsubscribe returns None
-        let (rx, sub) = p.new_subscriber("t/rob2", QoS::default()).await.unwrap();
+        let (rx, sub) = p
+            .new_subscriber("t/rob2", QoS::default(), SubscriberOptions::default())
+            .await
+            .unwrap();
         sub.unsubscribe();
         let result = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
         assert!(result.is_ok() && result.unwrap().is_none());
@@ -900,7 +976,6 @@ mod tests {
     //fusa:test REQ-RT-003
     //fusa:test REQ-RT-004
     //fusa:test REQ-RT-005
-    //fusa:test REQ-SEC-002
     //fusa:test REQ-SEC-005
     //fusa:test REQ-SEC-006
     //fusa:test REQ-SEC-008
@@ -947,7 +1022,8 @@ mod tests {
         // REQ-RT-003: MockParticipant::close does no I/O; completes synchronously.
         // REQ-RT-004: write path bounded by DropNewest/DropOldest policy.
         // REQ-RT-005: SubInner::new pre-allocates queue; no alloc on hot write path.
-        // REQ-SEC-002: PayloadTooLarge returned if payload exceeds transport limit.
+        // REQ-SEC-002: enforced by MockPublisher::write against QoS.max_sample_size;
+        //   see write_oversized_payload_returns_payload_too_large.
         // REQ-SEC-005: error messages contain no addresses or internal counters.
         // REQ-SEC-006: cargo audit runs in CI; blocks on RUSTSEC advisories.
         // REQ-SEC-008: sequence_number exposed in Sample for replay detection.

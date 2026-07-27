@@ -171,6 +171,10 @@ pub enum DurabilityKind {
 
 /// Quality-of-Service settings for a publisher or subscriber endpoint.
 ///
+/// Canonical fields per RELAY spec §15.2. Channel-level configuration
+/// (depth, back-pressure) is orthogonal to QoS and carried separately via
+/// `relay::SubscriberOptions` (§14) — see `Participant::new_subscriber`.
+///
 /// `DefaultQoS` is BestEffort + Volatile with history depth 1.
 /// `ReliableQoS` is Reliable + TransientLocal with history depth 1.
 //fusa:req REQ-QOS-001
@@ -186,12 +190,19 @@ pub struct QoS {
     pub durability: DurabilityKind,
     /// How many historical samples to retain (0 → implementation default of 1).
     pub history_depth: i32,
-    /// Maximum subscriber channel depth (0 → implementation default of 64).
-    pub channel_depth: usize,
     /// Maximum acceptable age of a sample in nanoseconds; 0 = disabled.
     pub deadline_ns: u64,
-    /// Back-pressure policy when the subscriber channel is full.
-    pub back_pressure: crate::relay::BackPressurePolicy,
+    /// Maximum payload size in bytes accepted by `Publisher::write`; 0 = unlimited.
+    //fusa:req REQ-SEC-002
+    pub max_sample_size: i32,
+    /// Relative transport scheduling priority; 0 = default.
+    pub transport_priority: i32,
+    /// Maximum acceptable delay before delivery in nanoseconds; 0 = disabled.
+    pub latency_budget_ns: u64,
+    /// Maximum age of a sample before it is considered stale, in nanoseconds; 0 = disabled.
+    pub lifespan_ns: u64,
+    /// Minimum interval between publications in nanoseconds; 0 = disabled.
+    pub publish_period_ns: u64,
 }
 
 impl Default for QoS {
@@ -200,9 +211,12 @@ impl Default for QoS {
             reliability: ReliabilityKind::BestEffort,
             durability: DurabilityKind::Volatile,
             history_depth: 1,
-            channel_depth: 0,
             deadline_ns: 0,
-            back_pressure: crate::relay::BackPressurePolicy::DropNewest,
+            max_sample_size: 0,
+            transport_priority: 0,
+            latency_budget_ns: 0,
+            lifespan_ns: 0,
+            publish_period_ns: 0,
         }
     }
 }
@@ -212,9 +226,12 @@ pub const DEFAULT_QOS: QoS = QoS {
     reliability: ReliabilityKind::BestEffort,
     durability: DurabilityKind::Volatile,
     history_depth: 1,
-    channel_depth: 0,
     deadline_ns: 0,
-    back_pressure: crate::relay::BackPressurePolicy::DropNewest,
+    max_sample_size: 0,
+    transport_priority: 0,
+    latency_budget_ns: 0,
+    lifespan_ns: 0,
+    publish_period_ns: 0,
 };
 
 /// Reliable + TransientLocal — for command / actuator topics where
@@ -223,9 +240,12 @@ pub const RELIABLE_QOS: QoS = QoS {
     reliability: ReliabilityKind::Reliable,
     durability: DurabilityKind::TransientLocal,
     history_depth: 1,
-    channel_depth: 0,
     deadline_ns: 0,
-    back_pressure: crate::relay::BackPressurePolicy::DropNewest,
+    max_sample_size: 0,
+    transport_priority: 0,
+    latency_budget_ns: 0,
+    lifespan_ns: 0,
+    publish_period_ns: 0,
 };
 
 // ---------------------------------------------------------------------------
