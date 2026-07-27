@@ -1096,6 +1096,55 @@
       "text": "The system shall maintain a table of known remote participants keyed by GUID prefix, updating each entry's last-seen time on every valid SPDP announcement received (applying a default 10-second lease when the peer's announcement did not carry one), shall periodically (once per second) evict any peer whose lease has expired, and shall ignore SPDP announcements whose GUID prefix matches the local participant's own, matching go-DDS's spdpService.storePeer/evictLoop/handlePacket behaviourally.",
       "category": "functional",
       "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-029",
+      "title": "SEDP EndpointData PL_CDR_LE encoding",
+      "text": "The system shall encode a SEDP publication/subscription EndpointData payload as a PL_CDR_LE parameter list containing the endpoint's GUID, its topic name, a hard-coded 'CDR_BLOB' type name, and a default unicast locator whose address is all-zero (filled in by the receiver from the announcement's UDP sender address), matching go-DDS's buildEndpointData byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-030",
+      "title": "SEDP EndpointData decoding with zero-address locator fill-in",
+      "text": "The system shall decode a SEDP EndpointData PL_CDR_LE payload field-by-field, filling in the IPv4 address of an all-zero default unicast locator from the announcement's UDP sender address, and shall discard the announcement without storing it if it carries no topic name, matching go-DDS's handleEndpointAnnounce behaviourally; malformed input (an invalid PL_CDR_LE header) shall be ignored rather than causing a panic.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-031",
+      "title": "SEDP local endpoint registration and announcement",
+      "text": "The system shall record each locally registered writer or reader, immediately broadcast a SEDP publication or subscription announcement for it to every participant known to SpdpService, and shall announce every already-registered local endpoint to a single newly-discovered peer on request, matching go-DDS's registerWriter/registerReader/onNewPeer behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-032",
+      "title": "SEDP remote endpoint topic matching",
+      "text": "The system shall match a newly-discovered remote writer against every local reader sharing its topic name (recording the remote data-delivery locator for each match), shall match a newly-registered local reader against every already-discovered remote writer sharing its topic name, and shall record every discovered remote reader with its data-delivery locator so that matched-reader-locator queries return exactly the peers subscribed to a given topic, matching go-DDS's onRemoteWriter/onRemoteReader/registerReader behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-033",
+      "title": "SEDP peer eviction propagation",
+      "text": "The system shall remove every remote writer, remote reader, remote reader locator, and matched writer locator associated with a given GUID prefix when that participant is evicted, matching go-DDS's onPeerEvicted behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-034",
+      "title": "SEDP receive-loop packet dispatch with self-filtering",
+      "text": "The system shall decode each received datagram as an RTPS message, ignore it if its GUID prefix matches the local participant, and dispatch each DATA submessage whose writer entity ID is the SEDP publications or subscriptions writer to endpoint-announcement handling; malformed input, non-DATA submessages, and DATA submessages from neither SEDP writer entity shall be silently ignored rather than causing a panic, matching go-DDS's handlePacket/receiveLoop behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-035",
+      "title": "Locator-to-SocketAddr conversion for RTPS unicast send",
+      "text": "The system shall convert a UDPv4 or UDPv6 Locator to a SocketAddr usable as a UDP send destination, and shall return no result rather than panicking for a locator of any other kind or a port value that does not fit in 16 bits, matching go-DDS's Locator.udpAddr behaviourally.",
+      "category": "functional",
+      "criticality": "medium"
     }
   ]
 }

@@ -13,8 +13,11 @@
 //! module docs. `spdp` (sub-phase 4, "SPDP") is the first module with
 //! participant/discovery dispatch logic — periodic multicast announce,
 //! decode-and-store of peer announcements, lease-based eviction — built on
-//! top of `cdr`'s `PL_CDR_LE` codec and `transport`'s sockets. SEDP and
-//! later sub-phases follow the same layering. This module tree is
+//! top of `cdr`'s `PL_CDR_LE` codec and `transport`'s sockets. `sedp`
+//! (sub-phase 5, "SEDP") is the unicast counterpart: once `spdp` has found a
+//! remote participant, `sedp` exchanges publication/subscription
+//! announcements with it and matches local/remote endpoints by topic name.
+//! Later sub-phases follow the same layering. This module tree is
 //! internal: it is **not** re-exported from the crate root and is **not**
 //! wired into the public `Participant`/`Publisher`/`Subscriber` API yet.
 //!
@@ -35,6 +38,7 @@ pub mod cdr;
 pub mod guid;
 pub mod locator;
 pub mod message;
+pub mod sedp;
 pub mod spdp;
 pub mod transport;
 

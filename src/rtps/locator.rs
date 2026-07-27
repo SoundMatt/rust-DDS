@@ -10,6 +10,8 @@
 //! (16 raw bytes — an IPv4 address occupies the last 4 bytes with the first
 //! 12 zeroed; an IPv6 address occupies the full 16 bytes).
 
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
 use super::RtpsDecodeError;
 
 /// 24-byte transport endpoint address (RTPS 2.3 §9.3.2).
@@ -99,6 +101,28 @@ impl Locator {
             kind: LOCATOR_KIND_UDPV6,
             port,
             address: addr,
+        }
+    }
+
+    /// Converts this `Locator` to a `SocketAddr` for use as a UDP send
+    /// destination. Matches go-DDS's `Locator.udpAddr`: `LOCATOR_KIND_UDPV4`
+    /// reads the address from the last 4 bytes of the 16-byte field,
+    /// `LOCATOR_KIND_UDPV6` reads the full 16 bytes; any other `kind`
+    /// (including [`LOCATOR_KIND_INVALID`]) or a `port` that does not fit in
+    /// `u16` returns `None` rather than panicking (REQ-RTPS-009) — matches
+    /// go-DDS's `nil`-returning default case.
+    //fusa:req REQ-RTPS-035
+    //fusa:req REQ-RTPS-009
+    pub fn udp_addr(&self) -> Option<SocketAddr> {
+        let port = u16::try_from(self.port).ok()?;
+        match self.kind {
+            LOCATOR_KIND_UDPV4 => {
+                let mut octets = [0u8; 4];
+                octets.copy_from_slice(&self.address[12..16]);
+                Some(SocketAddr::from((Ipv4Addr::from(octets), port)))
+            }
+            LOCATOR_KIND_UDPV6 => Some(SocketAddr::from((Ipv6Addr::from(self.address), port))),
+            _ => None,
         }
     }
 }
@@ -191,5 +215,39 @@ mod tests {
                 got: 0
             })
         );
+    }
+
+    //fusa:test REQ-RTPS-035
+    #[test]
+    fn udp_addr_matches_go_dds_reference() {
+        // go-DDS's Locator.udpAddr for the same UDPv4 locator used in
+        // udpv4_locator_matches_go_dds_reference above yields
+        // {IP: 192.168.1.50, Port: 7412} (verified by inspection of
+        // rtps/locator.go's udpAddr — a pure field re-projection with no
+        // encoding, so there is no separate byte-oracle run for this case).
+        let loc = Locator::udp_v4([192, 168, 1, 50], 7412);
+        assert_eq!(
+            loc.udp_addr(),
+            Some(SocketAddr::from((Ipv4Addr::new(192, 168, 1, 50), 7412)))
+        );
+
+        let mut addr = [0u8; 16];
+        addr[0] = 0xFF;
+        addr[15] = 0x01;
+        let loc6 = Locator::udp_v6(addr, 7412);
+        assert_eq!(
+            loc6.udp_addr(),
+            Some(SocketAddr::from((Ipv6Addr::from(addr), 7412)))
+        );
+    }
+
+    //fusa:test REQ-RTPS-035
+    //fusa:test REQ-RTPS-009
+    #[test]
+    fn udp_addr_rejects_invalid_kind_and_out_of_range_port_without_panicking() {
+        assert_eq!(Locator::default().udp_addr(), None);
+        let mut loc = Locator::udp_v4([1, 2, 3, 4], 7412);
+        loc.port = u32::from(u16::MAX) + 1; // does not fit in u16
+        assert_eq!(loc.udp_addr(), None);
     }
 }
