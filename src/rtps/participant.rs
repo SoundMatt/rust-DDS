@@ -20,9 +20,18 @@
 //! QoS (sub-phase 7)" section below), and sub-phase 8 (Fragmentation) with
 //! DATA_FRAG send/receive wiring on top of [`super::fragment`] — see
 //! [`RtpsWriter::write`] and the `SUBMSG_DATA_FRAG` case in
-//! [`RtpsParticipant::handle_data_packet`]. **Not** ported here (out of
-//! scope, per `ROADMAP.md`): the small stretch items in sub-phase 9
-//! (TransientLocal persistence, topic wildcard matching).
+//! [`RtpsParticipant::handle_data_packet`]. Sub-phase 9's two small stretch
+//! items are wired in here too: [`RtpsWriter::write`] flushes the last
+//! written payload per topic via [`super::persist::persist_flush`] (when
+//! [`RtpsParticipant::new_with_persistent_history`] configured a
+//! directory), [`RtpsParticipant::new_transient_local_reader`]/
+//! [`RtpsParticipant::new_reliable_transient_local_reader`] deliver a
+//! late-joining reader's TransientLocal last sample (in-memory first, disk
+//! via [`super::persist::persist_load`] as fallback), and
+//! [`RtpsParticipant::dispatch_to_readers`] matches topics with
+//! [`super::wildcard::topic_matches`] instead of plain equality — see
+//! `persist.rs`/`wildcard.rs`'s own module docs for the byte-format/
+//! matching-rule detail.
 //!
 //! # Wiring SEDP's match output
 //!
@@ -134,9 +143,11 @@ use super::message::{
     SequenceNumber, SubmessageIter, VendorId, PROTOCOL_VERSION_2_3, SUBMSG_ACKNACK, SUBMSG_DATA,
     SUBMSG_HEARTBEAT,
 };
+use super::persist::{persist_flush, persist_load};
 use super::reliable::{RecvTracker, SendHistory, HEARTBEAT_PERIOD};
 use super::sedp::SedpService;
 use super::transport::{RtpsDatagram, RtpsSocket};
+use super::wildcard::topic_matches;
 
 // ---------------------------------------------------------------------------
 // ReaderState / WriterState
@@ -217,6 +228,20 @@ pub struct RtpsParticipant {
     frag_assembler: FragmentAssembler,
     delivers: AtomicU64,
     drops: AtomicU64,
+    /// In-memory TransientLocal last-sample cache, keyed by topic. Matches
+    /// go-DDS's `p.lastSample` (a `sync.Map`); populated by every
+    /// [`RtpsWriter::write`] regardless of whether persistent history is
+    /// configured, and consulted (before falling back to disk) by
+    /// [`RtpsParticipant::new_transient_local_reader`]/
+    /// [`RtpsParticipant::new_reliable_transient_local_reader`]. See
+    /// `persist.rs`'s module docs.
+    last_sample: RwLock<HashMap<String, Sample>>,
+    /// Directory backing TransientLocal durability persistence
+    /// ([`super::persist`]), or `None` when persistence is disabled —
+    /// matches go-DDS's `p.persistDir` (empty string = disabled). Set once
+    /// at construction via [`RtpsParticipant::new_with_persistent_history`]
+    /// (go-DDS's `WithPersistentHistory` functional option).
+    persist_dir: Option<String>,
 }
 
 impl RtpsParticipant {
@@ -226,13 +251,42 @@ impl RtpsParticipant {
     /// matching go-DDS's single `p.dataSock` serving both roles. `sedp` is
     /// this participant's already-running [`SedpService`], used both to
     /// register local endpoints and to resolve matched remote readers'
-    /// delivery locators on every write.
+    /// delivery locators on every write. TransientLocal disk persistence
+    /// (sub-phase 9) is disabled — see
+    /// [`RtpsParticipant::new_with_persistent_history`] to enable it.
     //fusa:req REQ-RTPS-041
     pub fn new(
         guid_prefix: GuidPrefix,
         vendor_id: VendorId,
         data_socket: Arc<RtpsSocket>,
         sedp: Arc<SedpService>,
+    ) -> Arc<Self> {
+        Self::new_inner(guid_prefix, vendor_id, data_socket, sedp, None)
+    }
+
+    /// Creates a new participant runtime exactly like [`RtpsParticipant::new`],
+    /// with TransientLocal durability backed by files in `dir` (sub-phase 9
+    /// — see [`super::persist`]'s module docs for the on-disk format).
+    /// Matches go-DDS's `NewParticipant(..., WithPersistentHistory(dir))`.
+    /// An empty `dir` behaves identically to [`RtpsParticipant::new`]
+    /// (persistence disabled), matching go-DDS's own no-op convention.
+    //fusa:req REQ-RTPS-057
+    pub fn new_with_persistent_history(
+        guid_prefix: GuidPrefix,
+        vendor_id: VendorId,
+        data_socket: Arc<RtpsSocket>,
+        sedp: Arc<SedpService>,
+        dir: impl Into<String>,
+    ) -> Arc<Self> {
+        Self::new_inner(guid_prefix, vendor_id, data_socket, sedp, Some(dir.into()))
+    }
+
+    fn new_inner(
+        guid_prefix: GuidPrefix,
+        vendor_id: VendorId,
+        data_socket: Arc<RtpsSocket>,
+        sedp: Arc<SedpService>,
+        persist_dir: Option<String>,
     ) -> Arc<Self> {
         Arc::new(RtpsParticipant {
             guid_prefix,
@@ -245,6 +299,8 @@ impl RtpsParticipant {
             frag_assembler: FragmentAssembler::new(),
             delivers: AtomicU64::new(0),
             drops: AtomicU64::new(0),
+            last_sample: RwLock::new(HashMap::new()),
+            persist_dir,
         })
     }
 
@@ -356,16 +412,15 @@ impl RtpsParticipant {
     /// `cfg.ChanDepth(64)`).
     ///
     /// TransientLocal late-joiner delivery (go-DDS's `NewSubscriber`
-    /// delivering `p.lastSample`) is not in scope for this sub-phase — see
-    /// `ROADMAP.md` sub-phase 9's "TransientLocal durability persistence
-    /// hooks" stretch item.
+    /// delivering `p.lastSample`) is not performed by this constructor —
+    /// see [`RtpsParticipant::new_transient_local_reader`].
     //fusa:req REQ-RTPS-041
     pub async fn new_reader(
         self: &Arc<Self>,
         topic: impl Into<String>,
         opts: SubscriberOptions,
     ) -> (SampleReceiver, RtpsReader) {
-        self.new_reader_impl(topic, opts, false).await
+        self.new_reader_impl(topic, opts, false, false).await
     }
 
     /// Registers a new local **reliable** reader for `topic` (HEARTBEAT/
@@ -384,7 +439,45 @@ impl RtpsParticipant {
         topic: impl Into<String>,
         opts: SubscriberOptions,
     ) -> (SampleReceiver, RtpsReader) {
-        self.new_reader_impl(topic, opts, true).await
+        self.new_reader_impl(topic, opts, true, false).await
+    }
+
+    /// Registers a new local BestEffort **TransientLocal** reader for
+    /// `topic` (sub-phase 9): same registration as
+    /// [`RtpsParticipant::new_reader`], plus late-joiner delivery of the
+    /// topic's last written sample — from this participant's in-memory
+    /// [`RtpsParticipant::last_sample`] cache if a local
+    /// [`RtpsWriter::write`] has already populated it, otherwise (fallback)
+    /// from disk via [`super::persist::persist_load`] if
+    /// [`RtpsParticipant::new_with_persistent_history`] configured a
+    /// directory. Matches go-DDS's `NewSubscriber`'s
+    /// `if qos.Durability == dds.TransientLocal { ... }` block exactly,
+    /// including the disk-fallback-only-when-no-in-memory-sample ordering.
+    //fusa:req REQ-RTPS-057
+    pub async fn new_transient_local_reader(
+        self: &Arc<Self>,
+        topic: impl Into<String>,
+        opts: SubscriberOptions,
+    ) -> (SampleReceiver, RtpsReader) {
+        self.new_reader_impl(topic, opts, false, true).await
+    }
+
+    /// Registers a new local **Reliable + TransientLocal** reader for
+    /// `topic` (sub-phase 9): the union of
+    /// [`RtpsParticipant::new_reliable_reader`] and
+    /// [`RtpsParticipant::new_transient_local_reader`] — matches this
+    /// crate's `RELIABLE_QOS` combination (`src/types.rs`:
+    /// Reliable + TransientLocal), and go-DDS's own support for the two
+    /// QoS axes being fully orthogonal (`qos.Reliability` and
+    /// `qos.Durability` are independent fields on `NewSubscriber`'s `qos`
+    /// parameter).
+    //fusa:req REQ-RTPS-057
+    pub async fn new_reliable_transient_local_reader(
+        self: &Arc<Self>,
+        topic: impl Into<String>,
+        opts: SubscriberOptions,
+    ) -> (SampleReceiver, RtpsReader) {
+        self.new_reader_impl(topic, opts, true, true).await
     }
 
     async fn new_reader_impl(
@@ -392,6 +485,7 @@ impl RtpsParticipant {
         topic: impl Into<String>,
         opts: SubscriberOptions,
         reliable: bool,
+        transient_local: bool,
     ) -> (SampleReceiver, RtpsReader) {
         let topic = topic.into();
         let eid = entity_id_for_reader(self.next_entity_num());
@@ -414,6 +508,10 @@ impl RtpsParticipant {
             }
         }
 
+        if transient_local {
+            self.deliver_transient_local(&topic, &inner).await;
+        }
+
         (
             SampleReceiver { inner },
             RtpsReader {
@@ -421,6 +519,41 @@ impl RtpsParticipant {
                 eid,
             },
         )
+    }
+
+    /// Delivers `topic`'s last-known sample to a newly-registered
+    /// TransientLocal reader's queue, if one exists — in-memory cache
+    /// first, disk (via [`persist_load`]) as a fallback that also
+    /// backfills the in-memory cache so a *second* late joiner does not
+    /// need to touch disk again. Matches go-DDS's `NewSubscriber`
+    /// TransientLocal block. A disk read error (including "no file yet")
+    /// is treated the same as "nothing persisted" — never propagated as an
+    /// error to the caller, matching go-DDS's `if payload, err :=
+    /// persistLoad(...); err == nil && payload != nil`.
+    //fusa:req REQ-RTPS-057
+    async fn deliver_transient_local(&self, topic: &str, inner: &Arc<SubInner>) {
+        if let Some(sample) = self.last_sample.read().await.get(topic).cloned() {
+            inner.push(sample);
+            return;
+        }
+        let Some(dir) = self.persist_dir.as_deref() else {
+            return;
+        };
+        let Ok(Some(payload)) = persist_load(dir, topic) else {
+            return;
+        };
+        let sample = Sample {
+            topic: topic.to_string(),
+            payload,
+            timestamp: Utc::now(),
+            sequence_number: 0,
+            writer_guid: [0u8; 16],
+        };
+        self.last_sample
+            .write()
+            .await
+            .insert(topic.to_string(), sample.clone());
+        inner.push(sample);
     }
 
     /// Removes a reader from the dispatch table. Matches go-DDS's
@@ -852,10 +985,17 @@ impl RtpsParticipant {
     /// ...)`); `topic_filter = None` disables topic filtering and relies
     /// entirely on [`RtpsParticipant::accepts_source`] (used for the UDP
     /// receive path, where the DATA submessage carries no topic name —
-    /// matches go-DDS's `dispatchToReaders(..., "", ...)`). No topic
-    /// wildcard matching (go-DDS's `TopicMatches`/`wildcard.go`) — that is
-    /// sub-phase 9 stretch-item scope.
+    /// matches go-DDS's `dispatchToReaders(..., "", ...)`). `state.topic`
+    /// (a reader's registered topic, potentially an MQTT-style `+`/`#`
+    /// wildcard pattern — sub-phase 9) is matched against a non-`None`
+    /// `topic_filter` (always a concrete, wildcard-free writer topic) via
+    /// exact equality first, falling back to
+    /// [`super::wildcard::topic_matches`] — matches go-DDS's own
+    /// `r.topic != topicFilter && !TopicMatches(r.topic, topicFilter)`
+    /// short-circuit exactly (equality first, wildcard match only as a
+    /// fallback, not as a replacement).
     //fusa:req REQ-RTPS-038
+    //fusa:req REQ-RTPS-056
     async fn dispatch_to_readers(
         &self,
         source: Guid,
@@ -868,7 +1008,7 @@ impl RtpsParticipant {
         let writer_guid = source.to_bytes();
         for state in &readers {
             if let Some(tf) = topic_filter {
-                if state.topic != tf {
+                if state.topic != tf && !topic_matches(&state.topic, tf) {
                     continue;
                 }
             }
@@ -1077,8 +1217,35 @@ impl RtpsWriter {
             prefix: self.participant.guid_prefix,
             entity: self.eid,
         };
+        let now = Utc::now();
+
+        // TransientLocal durability (sub-phase 9): record this write as the
+        // topic's last sample (in-memory, always) and flush it to disk if
+        // persistent history is configured (a no-op when it is not — see
+        // `persist_flush`'s own docs). Matches go-DDS's
+        // `w.p.lastSample.Store(w.topic, &sample)` /
+        // `persistFlush(w.p.persistDir, w.topic, localCopy)`, both called
+        // unconditionally on every write, independent of whether *this*
+        // writer has any TransientLocal readers today — a reader
+        // registered after this write still needs to see it.
+        let last = Sample {
+            topic: self.topic.clone(),
+            payload: payload.to_vec(),
+            timestamp: now,
+            sequence_number: seq,
+            writer_guid: source.to_bytes(),
+        };
         self.participant
-            .dispatch_to_readers(source, Some(&self.topic), payload.to_vec(), Utc::now(), seq)
+            .last_sample
+            .write()
+            .await
+            .insert(self.topic.clone(), last);
+        if let Some(dir) = self.participant.persist_dir.as_deref() {
+            persist_flush(dir, &self.topic, payload);
+        }
+
+        self.participant
+            .dispatch_to_readers(source, Some(&self.topic), payload.to_vec(), now, seq)
             .await;
 
         for locator in self

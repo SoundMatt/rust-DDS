@@ -37,8 +37,18 @@
 //! reassembly (a `FragmentAssembler` fed from `RtpsParticipant`'s existing
 //! receive loop, dispatching a completed reassembly exactly like a DATA
 //! submessage — see `fragment.rs`'s module docs for why this exceeds
-//! go-DDS's own unwired `fragmentAssembler`). Later sub-phases follow the
-//! same layering. This module tree is internal: it is **not**
+//! go-DDS's own unwired `fragmentAssembler`). `persist` (sub-phase 9,
+//! "TransientLocal durability persistence hooks") and `wildcard`
+//! (sub-phase 9, "topic wildcard matching") are the last two small,
+//! self-contained pieces of Tier 1: `persist` is a disk-backed last-sample
+//! cache (`persist_load`/`persist_flush`) that `participant` wires into
+//! `RtpsWriter::write` (flush-on-write) and a new
+//! `RtpsParticipant::new_transient_local_reader`/`new_reliable_transient_local_reader`
+//! (load-on-subscribe fallback), and `wildcard` is pure MQTT-style
+//! `+`/`#` topic-pattern matching that `participant`'s
+//! `dispatch_to_readers` calls exactly where go-DDS's own
+//! `dispatchToReaders` calls `TopicMatches` — see each module's own docs.
+//! Later sub-phases follow the same layering. This module tree is internal: it is **not**
 //! re-exported from the crate root and is **not** wired into the public
 //! `Participant`/`Publisher`/`Subscriber` API yet.
 //!
@@ -61,10 +71,12 @@ pub mod guid;
 pub mod locator;
 pub mod message;
 pub mod participant;
+pub mod persist;
 pub mod reliable;
 pub mod sedp;
 pub mod spdp;
 pub mod transport;
+pub mod wildcard;
 
 use thiserror::Error;
 

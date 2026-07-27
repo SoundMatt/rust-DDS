@@ -1285,6 +1285,20 @@
       "text": "The system shall, for a writer whose CDR-wrapped payload exceeds the default per-fragment size, send DATA_FRAG submessages instead of a single DATA submessage, matching go-DDS's rtpsWriter.Write; and shall, on receipt of a DATA_FRAG submessage, feed it to a per-participant fragment reassembly buffer and dispatch the completed reassembly to matched local readers exactly like a completed DATA submessage, including reliable-reader gap tracking and reactive ACKNACK.",
       "category": "functional",
       "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-056",
+      "title": "Topic wildcard matching",
+      "text": "The system shall report whether an MQTT-style topic pattern (where '+' matches exactly one topic level and '#' at the end of a segment matches zero or more remaining levels) matches a concrete topic name, matching go-DDS's TopicMatches behaviourally for the same pattern/topic pairs; and the participant's local-reader dispatch path shall use this matching as a fallback when a reader's registered topic is not a literal match for a writer's topic, matching go-DDS's dispatchToReaders' use of TopicMatches exactly (and nowhere else, matching go-DDS's own SEDP endpoint-matching code, which never calls TopicMatches).",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-057",
+      "title": "TransientLocal durability persistence",
+      "text": "The system shall, when configured with a persistence directory, persist the most recently written payload for each topic to a single file per topic (a 4-byte little-endian length prefix followed by the raw payload bytes) on every write, and shall load a topic's persisted payload from disk to deliver to a newly-registered TransientLocal reader when no in-memory last sample exists yet for that topic, matching go-DDS's WithPersistentHistory/persistLoad/persistFlush behaviourally and byte-for-byte for the on-disk file format; disk I/O failures during load or flush shall never panic or propagate as a write failure to the caller.",
+      "category": "functional",
+      "criticality": "medium"
     }
   ]
 }
