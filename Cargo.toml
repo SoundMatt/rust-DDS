@@ -1,6 +1,6 @@
 [package]
 name = "rust-dds"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "rust-DDS: Rust library for DDS (Data Distribution Service) publish/subscribe — RELAY conformant."
 license = "MPL-2.0"
@@ -17,6 +17,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "rust-dds"
 path = "src/bin/main.rs"
+
+# Test/dev support tool for the "live two-process test harness" interop
+# deliverable (ROADMAP.md, "Interop testing" section) — not part of the
+# public library API. See src/bin/rtps_interop_peer.rs's module docs.
+[[bin]]
+name = "rtps-interop-peer"
+path = "src/bin/rtps_interop_peer.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

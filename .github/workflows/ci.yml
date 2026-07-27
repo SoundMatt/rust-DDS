@@ -120,6 +120,34 @@ jobs:
       - name: Run behavioural conformance (SKIP is PASS; FAIL blocks)
         run: /tmp/relay interop ./target/release/rust-dds
 
+  rtps-interop:
+    name: RTPS wire-level interop (ROADMAP.md "Interop testing")
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Deliverable 1/3: live two-process test harness — two real
+      # `rtps-interop-peer` OS processes on real UDP loopback/multicast,
+      # asserting SPDP discovery, SEDP matching, and end-to-end sample
+      # delivery, including a reliable-QoS run that forces and recovers a
+      # real dropped datagram between the two processes. `#[ignore]`d in
+      # the default `cargo test` sweep (real process spawning + real UDP
+      # multicast is unsuited to the cross-platform test matrix), so it
+      # only runs here — analogous to but distinct from the `relay-interop`
+      # job above (that job checks RELAY-adapter JSON equivalence, never
+      # puts a packet on a wire; this job does).
+      - name: Live two-process RTPS interop (SPDP + SEDP + reliable retransmission)
+        run: cargo test --release --test rtps_two_process_interop -- --ignored --test-threads=1
+      # Deliverable 2/3: pcap-fixture conformance — recorded known-good
+      # go-DDS RTPS traffic decoded and checked byte-for-byte against
+      # RTPS 2.3 §9 framing. Not `#[ignore]`d (no live peer, no network,
+      # deterministic) so it already runs in the default `test` job too;
+      # re-run here so a full green `rtps-interop` job is one place to
+      # look for "is RTPS interop OK".
+      - name: pcap-fixture conformance (byte-exact go-DDS reference decode)
+        run: cargo test --test rtps_pcap_conformance
+
   rsfusa-check:
     name: rsFuSa safety check — exits 1 on ERROR (§20.1.2, REQ-ASIL/IEC/DO)
     runs-on: ubuntu-latest
