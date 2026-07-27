@@ -630,7 +630,25 @@ harder to change.
 
 ### Planned — v0.2 — RTPS Transport (Tier 1)
 
-- [ ] Pure-Rust RTPS/UDP transport (`rtps::RtpsParticipant`)
+- [x] Pure-Rust RTPS/UDP transport (`rtps::RtpsParticipant`) — the RTPS
+  engine itself (`rtps::participant::RtpsParticipant` and its
+  `RtpsWriter`/`RtpsReader` handles) landed across Tier 1 sub-phases 1–9
+  (`rust-DDS#22`–`#30`); this item's own remaining scope — wiring that
+  engine into a public-facing implementation of
+  `Participant`/`Publisher`/`Subscriber` so application code can use it the
+  same way it uses `mock::MockParticipant` — is done:
+  `rtps::dds_participant::RtpsUdpParticipant`. `RtpsUdpParticipant::new`
+  binds the meta/data unicast sockets and the SPDP multicast socket at the
+  RTPS 2.3 §9.6.1 formula ports and starts every background task a live
+  participant needs (SPDP announce/evict/receive, SEDP receive, the
+  SPDP→SEDP and SEDP→`RtpsParticipant` discovery bridges, the data-socket
+  receive/dispatch loop) — the same bootstrap sequence
+  `src/bin/rtps_interop_peer.rs` already exercised as a standalone test/dev
+  binary, now behind a library constructor. `QoS::reliability`/
+  `QoS::durability` select among the four reader constructors sub-phase 9
+  built (BestEffort/Reliable × Volatile/TransientLocal). `adapt()`/
+  `relay::Node` need no change: they already work with any
+  `Arc<dyn Participant>`. Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001).
 - [ ] CDR/XCDR1 serialization for RTPS wire format
 - [ ] SPDP participant discovery (multicast + unicast)
 - [x] SEDP endpoint announcement

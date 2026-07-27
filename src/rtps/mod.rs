@@ -48,9 +48,19 @@
 //! `+`/`#` topic-pattern matching that `participant`'s
 //! `dispatch_to_readers` calls exactly where go-DDS's own
 //! `dispatchToReaders` calls `TopicMatches` — see each module's own docs.
-//! Later sub-phases follow the same layering. This module tree is internal: it is **not**
-//! re-exported from the crate root and is **not** wired into the public
-//! `Participant`/`Publisher`/`Subscriber` API yet.
+//! Later sub-phases follow the same layering.
+//!
+//! `dds_participant` (`ROADMAP.md`'s "Planned — v0.2 — RTPS Transport
+//! (Tier 1)" milestone, "Pure-Rust RTPS/UDP transport
+//! (`rtps::RtpsParticipant`)") is the one exception to "internal, not wired
+//! into the public API" below: [`dds_participant::RtpsUdpParticipant`]
+//! implements [`crate::participant::Participant`]/
+//! [`crate::participant::Publisher`]/[`crate::participant::Subscriber`] on
+//! top of everything sub-phases 1–9 built, so application code can use a
+//! real, network-capable participant through the same public traits
+//! [`crate::mock::MockParticipant`] implements — see that module's own
+//! docs. Every other module in this tree remains internal: not
+//! re-exported from the crate root, not wired into the public traits.
 //!
 //! Byte layout for every type here is derived from go-DDS's `rtps` package
 //! (`github.com/SoundMatt/go-DDS`, RTPS 2.3), which the roadmap designates
@@ -79,6 +89,7 @@
 //! not a wire type.
 
 pub mod cdr;
+pub mod dds_participant;
 pub mod fragment;
 pub mod guid;
 pub mod locator;

@@ -52,6 +52,28 @@ impl GuidPrefix {
     }
 }
 
+/// Generates a process-unique `GuidPrefix` for a live network participant:
+/// 8 random bytes followed by this process's PID (4 bytes, little-endian) —
+/// matches go-DDS's `newGuidPrefix` (`rtps/guid.go`) byte-for-byte layout,
+/// though rust-DDS uses `rand`'s default (non-cryptographic) generator
+/// rather than `crypto/rand`, since this assignment only needs to be
+/// distinct enough across concurrently-running participants on one host,
+/// not unguessable — go-DDS's own doc comment for `newGuidPrefix` makes the
+/// same "distinguish the participant" claim, not a security one. Used by
+/// [`super::dds_participant::RtpsUdpParticipant::new`]; every existing
+/// internal test in this module tree instead uses a fixed prefix (see
+/// `participant.rs::tests::ascending_prefix`), since deterministic test
+/// output matters more there than realistic identity assignment.
+//fusa:req REQ-GUID-001
+//fusa:req REQ-GUID-002
+pub(crate) fn random_guid_prefix() -> GuidPrefix {
+    let mut bytes = [0u8; 12];
+    let random_part: [u8; 8] = rand::random();
+    bytes[..8].copy_from_slice(&random_part);
+    bytes[8..12].copy_from_slice(&std::process::id().to_le_bytes());
+    GuidPrefix(bytes)
+}
+
 // ---------------------------------------------------------------------------
 // EntityId
 // ---------------------------------------------------------------------------
@@ -207,6 +229,21 @@ pub fn entity_id_for_reader(n: u32) -> EntityId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    //fusa:test REQ-GUID-001
+    //fusa:test REQ-GUID-002
+    #[test]
+    fn random_guid_prefix_embeds_this_process_pid_and_varies() {
+        let a = random_guid_prefix();
+        let b = random_guid_prefix();
+        let pid_bytes = std::process::id().to_le_bytes();
+        assert_eq!(&a.0[8..12], &pid_bytes[..]);
+        assert_eq!(&b.0[8..12], &pid_bytes[..]);
+        // The random first 8 bytes differ between two independent calls
+        // (astronomically unlikely to collide by chance — not a flaky
+        // assertion in practice).
+        assert_ne!(&a.0[..8], &b.0[..8]);
+    }
 
     // Reference bytes reproduced from go-DDS's actual rtps package. Go
     // reproduction (run from a go-DDS checkout, package-local scratch test

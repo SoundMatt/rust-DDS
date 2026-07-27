@@ -77,9 +77,14 @@ pub mod relay;
 /// RTPS wire-protocol types (Tier 1 sub-phase 1 of `ROADMAP.md`'s parity
 /// build-out plan). `pub` so the compiler treats it as a real reusable API
 /// surface rather than dead code, but deliberately not re-exported from the
-/// crate root's `pub use` list and not referenced by
-/// `Participant`/`Publisher`/`Subscriber` or `relay::Node` — no behavior
-/// change to the existing public surface. See the `rtps` module docs.
+/// crate root's `pub use` list, mirroring how `mock::MockParticipant` is
+/// reached via `rust_dds::mock::MockParticipant` rather than the crate
+/// root. `rtps::dds_participant::RtpsUdpParticipant` (`ROADMAP.md`'s
+/// "Planned — v0.2 — RTPS Transport (Tier 1)" milestone) implements
+/// `Participant`/`Publisher`/`Subscriber` — a real, UDP-backed participant
+/// usable anywhere those traits are, same as `mock::MockParticipant`; every
+/// other module under `rtps` remains internal, not referenced by those
+/// traits or by `relay::Node`. See the `rtps` module docs.
 pub mod rtps;
 
 pub mod types;
