@@ -1,6 +1,6 @@
 [package]
 name = "rust-dds"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "rust-DDS: Rust library for DDS (Data Distribution Service) publish/subscribe — RELAY conformant."
 license = "MPL-2.0"
@@ -29,6 +29,7 @@ clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 base64 = "0.22"
 socket2 = "0.6"
+rand = "0.8"
 
 [dev-dependencies]
 tokio-test = "0.4"

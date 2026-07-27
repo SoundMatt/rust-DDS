@@ -106,6 +106,22 @@ pub const ENTITYID_SEDP_SUB_READER: EntityId = EntityId([0x00, 0x00, 0x04, 0xC7]
 //fusa:req REQ-RTPS-002
 pub const ENTITYID_UNKNOWN: EntityId = EntityId([0x00, 0x00, 0x00, 0x00]);
 
+// Builtin endpoint availability bitmask (RTPS 2.3 §8.5.4.3 / §9.6.2.2),
+// carried in an SPDP ParticipantProxy's `PID_BUILTIN_ENDPOINT_SET`
+// parameter. Matches go-DDS's `rtps/guid.go` exactly (same bit positions).
+//fusa:req REQ-RTPS-024
+pub const ENDPOINT_SPDP_ANNOUNCER: u32 = 1 << 0;
+//fusa:req REQ-RTPS-024
+pub const ENDPOINT_SPDP_DETECTOR: u32 = 1 << 1;
+//fusa:req REQ-RTPS-024
+pub const ENDPOINT_SEDP_PUB_ANNOUNCER: u32 = 1 << 2;
+//fusa:req REQ-RTPS-024
+pub const ENDPOINT_SEDP_PUB_DETECTOR: u32 = 1 << 3;
+//fusa:req REQ-RTPS-024
+pub const ENDPOINT_SEDP_SUB_ANNOUNCER: u32 = 1 << 4;
+//fusa:req REQ-RTPS-024
+pub const ENDPOINT_SEDP_SUB_DETECTOR: u32 = 1 << 5;
+
 // ---------------------------------------------------------------------------
 // GUID
 // ---------------------------------------------------------------------------
@@ -291,5 +307,27 @@ mod tests {
         ENTITYID_PARTICIPANT.encode(&mut buf);
         buf.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
         assert_eq!(EntityId::decode(&buf).unwrap(), ENTITYID_PARTICIPANT);
+    }
+
+    //fusa:test REQ-RTPS-024
+    #[test]
+    fn builtin_endpoint_bitmask_matches_go_dds_reference() {
+        // Bit positions ported 1:1 from go-DDS's rtps/guid.go; a
+        // ParticipantProxy advertising all six SPDP+SEDP builtin endpoints
+        // encodes PID_BUILTIN_ENDPOINT_SET = 0x3f, matching the value used
+        // throughout this crate's SPDP/CDR reference tests.
+        assert_eq!(ENDPOINT_SPDP_ANNOUNCER, 0x01);
+        assert_eq!(ENDPOINT_SPDP_DETECTOR, 0x02);
+        assert_eq!(ENDPOINT_SEDP_PUB_ANNOUNCER, 0x04);
+        assert_eq!(ENDPOINT_SEDP_PUB_DETECTOR, 0x08);
+        assert_eq!(ENDPOINT_SEDP_SUB_ANNOUNCER, 0x10);
+        assert_eq!(ENDPOINT_SEDP_SUB_DETECTOR, 0x20);
+        let all = ENDPOINT_SPDP_ANNOUNCER
+            | ENDPOINT_SPDP_DETECTOR
+            | ENDPOINT_SEDP_PUB_ANNOUNCER
+            | ENDPOINT_SEDP_PUB_DETECTOR
+            | ENDPOINT_SEDP_SUB_ANNOUNCER
+            | ENDPOINT_SEDP_SUB_DETECTOR;
+        assert_eq!(all, 0x3f);
     }
 }

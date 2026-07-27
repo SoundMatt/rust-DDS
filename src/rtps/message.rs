@@ -11,7 +11,7 @@
 //! half — DATA/HEARTBEAT/ACKNACK/GAP/INFO_TS submessage *bodies* are later
 //! Tier 1 sub-phases, not this one).
 
-use super::guid::GuidPrefix;
+use super::guid::{EntityId, GuidPrefix};
 use super::RtpsDecodeError;
 
 // ---------------------------------------------------------------------------
@@ -299,6 +299,177 @@ impl SubmessageHeader {
 }
 
 // ---------------------------------------------------------------------------
+// DataSubmessage (RTPS 2.3 §9.4.5.3)
+// ---------------------------------------------------------------------------
+
+/// Parsed fields of a DATA submessage.
+//fusa:req REQ-RTPS-021
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DataSubmessage {
+    pub reader_entity_id: EntityId,
+    pub writer_entity_id: EntityId,
+    pub seq_num: SequenceNumber,
+    /// `None` when the `D` (data) flag is not set, or the submessage body
+    /// carries no bytes past the fixed 20-byte prefix.
+    pub payload: Option<Vec<u8>>,
+}
+
+/// Builds a full DATA submessage (4-byte `SubmessageHeader` + body) carrying
+/// `serialised_payload`. `serialised_payload` should already include its CDR
+/// encapsulation header (see [`super::cdr::wrap_payload`]/
+/// [`super::cdr::PlCdrEncoder::finish`]).
+///
+/// Body layout (RTPS 2.3 §9.4.5.3): `extraFlags`(2, always zero) +
+/// `octetsToInlineQos`(2, always 16 — the fixed distance from the end of
+/// that field to the start of `payload`) + `readerId`(4) + `writerId`(4) +
+/// `seqNum`(8) + `payload`(variable). Matches go-DDS's
+/// `marshalDataSubmessage` byte-for-byte; always sets the `E` (little-endian)
+/// and `D` (data present) flags, matching go-DDS's own emission (this crate
+/// never emits inline QoS or a keyed-only DATA, so those flags never need to
+/// be set here).
+//fusa:req REQ-RTPS-021
+pub fn encode_data_submessage(
+    writer_entity_id: EntityId,
+    reader_entity_id: EntityId,
+    seq_num: SequenceNumber,
+    serialised_payload: &[u8],
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(20 + serialised_payload.len());
+    body.extend_from_slice(&0u16.to_le_bytes()); // extraFlags
+    body.extend_from_slice(&16u16.to_le_bytes()); // octetsToInlineQos
+    reader_entity_id.encode(&mut body);
+    writer_entity_id.encode(&mut body);
+    seq_num.encode(&mut body);
+    body.extend_from_slice(serialised_payload);
+
+    let mut out = Vec::with_capacity(SubmessageHeader::LEN + body.len());
+    let header = SubmessageHeader {
+        submessage_id: SUBMSG_DATA,
+        flags: FLAG_ENDIANNESS | FLAG_DATA,
+        octets_to_next_header: body.len() as u16,
+    };
+    header.encode(&mut out);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Decodes a `DataSubmessage` from a DATA submessage *body* (the bytes after
+/// the 4-byte `SubmessageHeader` — pass `flags` from that header
+/// separately). Matches go-DDS's `parseDataSubmessage`.
+///
+/// Returns `Err(RtpsDecodeError::Truncated)` — never panics — if `body` is
+/// shorter than the fixed 20-byte prefix.
+//fusa:req REQ-RTPS-021
+//fusa:req REQ-RTPS-009
+pub fn decode_data_submessage(flags: u8, body: &[u8]) -> Result<DataSubmessage, RtpsDecodeError> {
+    if body.len() < 20 {
+        return Err(RtpsDecodeError::Truncated {
+            expected: 20,
+            got: body.len(),
+        });
+    }
+    let reader_entity_id = EntityId::decode(&body[4..8])?;
+    let writer_entity_id = EntityId::decode(&body[8..12])?;
+    let seq_num = SequenceNumber::decode(&body[12..20])?;
+    let payload = if flags & FLAG_DATA != 0 && body.len() > 20 {
+        Some(body[20..].to_vec())
+    } else {
+        None
+    };
+    Ok(DataSubmessage {
+        reader_entity_id,
+        writer_entity_id,
+        seq_num,
+        payload,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Submessage iteration (RTPS 2.3 §9.4.2)
+// ---------------------------------------------------------------------------
+
+/// A single raw (not-yet-interpreted) submessage: its 1-byte id, 1-byte
+/// flags, and body bytes (the `octetsToNextHeader`-length slice following
+/// its 4-byte `SubmessageHeader`).
+//fusa:req REQ-RTPS-022
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawSubmessage<'a> {
+    pub id: u8,
+    pub flags: u8,
+    pub body: &'a [u8],
+}
+
+/// Iterates over the submessages in an RTPS message body (the bytes
+/// immediately after the 20-byte [`Header`]). Matches go-DDS's
+/// `parseSubmessages`: stops cleanly (no error) once fewer than 4 bytes
+/// remain, but yields one `Err` — and then stops — if a submessage's
+/// declared `octetsToNextHeader` length would run past the end of the
+/// input. Never panics or indexes out of bounds on malformed input
+/// (REQ-RTPS-009).
+//fusa:req REQ-RTPS-022
+//fusa:req REQ-RTPS-009
+#[derive(Debug)]
+pub struct SubmessageIter<'a> {
+    body: &'a [u8],
+    errored: bool,
+}
+
+impl<'a> SubmessageIter<'a> {
+    /// Creates an iterator over `body`.
+    //fusa:req REQ-RTPS-022
+    pub fn new(body: &'a [u8]) -> Self {
+        SubmessageIter {
+            body,
+            errored: false,
+        }
+    }
+}
+
+impl<'a> Iterator for SubmessageIter<'a> {
+    type Item = Result<RawSubmessage<'a>, RtpsDecodeError>;
+
+    //fusa:req REQ-RTPS-022
+    //fusa:req REQ-RTPS-009
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.errored || self.body.len() < 4 {
+            return None;
+        }
+        let id = self.body[0];
+        let flags = self.body[1];
+        let length = u16::from_le_bytes([self.body[2], self.body[3]]) as usize;
+        let rest = &self.body[4..];
+        if length > rest.len() {
+            self.errored = true;
+            return Some(Err(RtpsDecodeError::Truncated {
+                expected: length,
+                got: rest.len(),
+            }));
+        }
+        let (msg_body, remainder) = rest.split_at(length);
+        self.body = remainder;
+        Some(Ok(RawSubmessage {
+            id,
+            flags,
+            body: msg_body,
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Message wrapping
+// ---------------------------------------------------------------------------
+
+/// Prepends the 20-byte RTPS [`Header`] to already-encoded submessage bytes.
+/// Matches go-DDS's `wrapInRTPSMessage`.
+//fusa:req REQ-RTPS-023
+pub fn wrap_in_rtps_message(header: Header, submessages: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(Header::LEN + submessages.len());
+    header.encode(&mut out);
+    out.extend_from_slice(submessages);
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -505,5 +676,211 @@ mod tests {
         let sn = SequenceNumber { high: 0, low: 5 };
         assert_eq!(sn.to_u64(), 5);
         assert_eq!(SequenceNumber::from_u64(5), sn);
+    }
+
+    // Reference bytes reproduced from go-DDS's actual rtps package (real
+    // marshalDataSubmessage/wrapInRTPSMessage/parseDataSubmessage/
+    // parseSubmessages, not reimplemented). Go reproduction (package-local
+    // scratch test file, `rtps/zzrepro_message2_test.go`, never committed to
+    // go-DDS, deleted after use):
+    //
+    //   var prefix GuidPrefix
+    //   for i := 0; i < 12; i++ { prefix[i] = byte(i + 1) }
+    //
+    //   payload := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE}
+    //   submsg := marshalDataSubmessage(EntityIdSPDPWriter, EntityIdSPDPReader,
+    //       SequenceNumber{High: 0, Low: 7}, payload)
+    //   fmt.Printf("%x\n", submsg)
+    //   // -> 1505190000001000000100c7000100c20000000007000000aabbccddee
+    //
+    //   fmt.Printf("%x\n", wrapInRTPSMessage(prefix, submsg))
+    //   // -> 52545053020301270102030405060708090a0b0c1505190000001000000100
+    //   //    c7000100c20000000007000000aabbccddee
+    //
+    //   ds, ok := parseDataSubmessage(flagEndianness|flagData, submsg[4:])
+    //   // ok=true readerEID=000100c7 writerEID=000100c2 seq={0 7} payload=aabbccddee
+    //
+    //   submsg2 := marshalDataSubmessage(EntityIdSEDPPubWriter, EntityIdSEDPPubReader,
+    //       SequenceNumber{High: 0, Low: 8}, nil)
+    //   both := append(append([]byte{}, submsg...), submsg2...)
+    //   count := 0
+    //   parseSubmessages(both, func(id, flags byte, body []byte) error {
+    //       fmt.Printf("id=%#x flags=%#x bodylen=%d\n", id, flags, len(body))
+    //       count++
+    //       return nil
+    //   })
+    //   // submsg[0]: id=0x15 flags=0x5 bodylen=25
+    //   // submsg[1]: id=0x15 flags=0x5 bodylen=20
+    //   // count = 2
+    //
+    // Full run: `go test ./rtps/... -run TestZZReproMessageFramingBytes -v`
+    // (go-DDS commit 3329f86 / rust-DDS branch feat/rtps-spdp).
+
+    //fusa:test REQ-RTPS-021
+    #[test]
+    fn encode_data_submessage_matches_go_dds_reference() {
+        use crate::rtps::guid::{ENTITYID_SPDP_READER, ENTITYID_SPDP_WRITER};
+
+        let submsg = encode_data_submessage(
+            ENTITYID_SPDP_WRITER,
+            ENTITYID_SPDP_READER,
+            SequenceNumber { high: 0, low: 7 },
+            &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        );
+        assert_eq!(
+            hex::encode(&submsg),
+            "1505190000001000000100c7000100c20000000007000000aabbccddee"
+        );
+    }
+
+    //fusa:test REQ-RTPS-023
+    #[test]
+    fn wrap_in_rtps_message_matches_go_dds_reference() {
+        use crate::rtps::guid::{ENTITYID_SPDP_READER, ENTITYID_SPDP_WRITER};
+
+        let submsg = encode_data_submessage(
+            ENTITYID_SPDP_WRITER,
+            ENTITYID_SPDP_READER,
+            SequenceNumber { high: 0, low: 7 },
+            &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        );
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: VendorId([0x01, 0x27]), // go-DDS's own vendor id, for byte-exact parity
+            guid_prefix: ascending_prefix(),
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+        assert_eq!(
+            hex::encode(&msg),
+            concat!(
+                "52545053020301270102030405060708090a0b0c",
+                "1505190000001000000100c7000100c20000000007000000aabbccddee",
+            )
+        );
+    }
+
+    //fusa:test REQ-RTPS-021
+    #[test]
+    fn decode_data_submessage_matches_go_dds_reference() {
+        use crate::rtps::guid::{ENTITYID_SPDP_READER, ENTITYID_SPDP_WRITER};
+
+        let submsg =
+            hex::decode("1505190000001000000100c7000100c20000000007000000aabbccddee").unwrap();
+        let ds = decode_data_submessage(FLAG_ENDIANNESS | FLAG_DATA, &submsg[4..]).unwrap();
+        assert_eq!(ds.reader_entity_id, ENTITYID_SPDP_READER);
+        assert_eq!(ds.writer_entity_id, ENTITYID_SPDP_WRITER);
+        assert_eq!(ds.seq_num, SequenceNumber { high: 0, low: 7 });
+        assert_eq!(ds.payload, Some(vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE]));
+    }
+
+    //fusa:test REQ-RTPS-021
+    //fusa:test REQ-RTPS-009
+    #[test]
+    fn decode_data_submessage_rejects_truncated_input_without_panicking() {
+        assert_eq!(
+            decode_data_submessage(FLAG_ENDIANNESS | FLAG_DATA, &[0u8; 19]),
+            Err(RtpsDecodeError::Truncated {
+                expected: 20,
+                got: 19
+            })
+        );
+    }
+
+    //fusa:test REQ-RTPS-021
+    #[test]
+    fn data_submessage_round_trip() {
+        use crate::rtps::guid::{ENTITYID_SEDP_PUB_READER, ENTITYID_SEDP_PUB_WRITER};
+
+        let submsg = encode_data_submessage(
+            ENTITYID_SEDP_PUB_WRITER,
+            ENTITYID_SEDP_PUB_READER,
+            SequenceNumber { high: 3, low: 99 },
+            &[0x01, 0x02, 0x03],
+        );
+        let sh = SubmessageHeader::decode(&submsg).unwrap();
+        let ds = decode_data_submessage(sh.flags, &submsg[SubmessageHeader::LEN..]).unwrap();
+        assert_eq!(ds.reader_entity_id, ENTITYID_SEDP_PUB_READER);
+        assert_eq!(ds.writer_entity_id, ENTITYID_SEDP_PUB_WRITER);
+        assert_eq!(ds.seq_num, SequenceNumber { high: 3, low: 99 });
+        assert_eq!(ds.payload, Some(vec![0x01, 0x02, 0x03]));
+    }
+
+    //fusa:test REQ-RTPS-021
+    #[test]
+    fn data_submessage_with_no_payload_has_none_payload() {
+        use crate::rtps::guid::ENTITYID_UNKNOWN;
+
+        let submsg = encode_data_submessage(
+            ENTITYID_UNKNOWN,
+            ENTITYID_UNKNOWN,
+            SequenceNumber { high: 0, low: 1 },
+            &[],
+        );
+        // id=DATA, flags=E|D, octetsToNextHeader=20 — matches the doc
+        // comment above `submessage_header_data_matches_go_dds_reference`.
+        assert_eq!(&submsg[..4], hex::decode("15051400").unwrap().as_slice());
+        let ds = decode_data_submessage(FLAG_ENDIANNESS | FLAG_DATA, &submsg[4..]).unwrap();
+        assert_eq!(ds.payload, None);
+    }
+
+    //fusa:test REQ-RTPS-022
+    #[test]
+    fn submessage_iter_matches_go_dds_reference() {
+        use crate::rtps::guid::{
+            ENTITYID_SEDP_PUB_READER, ENTITYID_SEDP_PUB_WRITER, ENTITYID_SPDP_READER,
+            ENTITYID_SPDP_WRITER,
+        };
+
+        let submsg1 = encode_data_submessage(
+            ENTITYID_SPDP_WRITER,
+            ENTITYID_SPDP_READER,
+            SequenceNumber { high: 0, low: 7 },
+            &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        );
+        let submsg2 = encode_data_submessage(
+            ENTITYID_SEDP_PUB_WRITER,
+            ENTITYID_SEDP_PUB_READER,
+            SequenceNumber { high: 0, low: 8 },
+            &[],
+        );
+        let mut both = submsg1.clone();
+        both.extend_from_slice(&submsg2);
+
+        let parsed: Vec<_> = SubmessageIter::new(&both)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, SUBMSG_DATA);
+        assert_eq!(parsed[0].flags, 0x5);
+        assert_eq!(parsed[0].body.len(), 25);
+        assert_eq!(parsed[1].id, SUBMSG_DATA);
+        assert_eq!(parsed[1].flags, 0x5);
+        assert_eq!(parsed[1].body.len(), 20);
+    }
+
+    //fusa:test REQ-RTPS-022
+    #[test]
+    fn submessage_iter_stops_cleanly_below_four_bytes() {
+        let parsed: Vec<_> = SubmessageIter::new(&[0x01, 0x02, 0x03]).collect();
+        assert!(parsed.is_empty());
+        let parsed: Vec<_> = SubmessageIter::new(&[]).collect();
+        assert!(parsed.is_empty());
+    }
+
+    //fusa:test REQ-RTPS-022
+    //fusa:test REQ-RTPS-009
+    #[test]
+    fn submessage_iter_yields_error_and_stops_on_length_past_end_without_panicking() {
+        let mut buf = vec![SUBMSG_DATA, FLAG_ENDIANNESS, 0xFF, 0xFF]; // claims 65535 bytes
+        buf.extend_from_slice(&[0x01, 0x02]); // but only 2 remain
+        let mut iter = SubmessageIter::new(&buf);
+        assert_eq!(
+            iter.next(),
+            Some(Err(RtpsDecodeError::Truncated {
+                expected: 0xFFFF,
+                got: 2
+            }))
+        );
+        assert_eq!(iter.next(), None);
     }
 }
