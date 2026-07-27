@@ -1008,7 +1008,7 @@
     },
     {
       "id": "REQ-RTPS-016",
-      "title": "RTPS 2.3 §9.6.1 port-assignment formula",
+      "title": "RTPS 2.3 \u00a79.6.1 port-assignment formula",
       "text": "The system shall compute the SPDP metatraffic multicast port as 7400 + 250*domain, the metatraffic unicast port as 7400 + 250*domain + 10 + 2*participant_idx, and the user-data unicast port as 7400 + 250*domain + 11 + 2*participant_idx, matching go-DDS's rtps.metaMulticastPort/metaUnicastPort/userUnicastPort exactly.",
       "category": "functional",
       "criticality": "high"
@@ -1044,7 +1044,7 @@
     {
       "id": "REQ-RTPS-021",
       "title": "DATA submessage encode/decode",
-      "text": "The system shall encode a DATA submessage body as extraFlags(2, zero) + octetsToInlineQos(2, always 16) + readerId(4) + writerId(4) + seqNum(8) + serialised payload, and shall decode the same layout back into reader/writer EntityId, SequenceNumber, and an optional payload (present only when the D flag is set and body bytes remain), matching go-DDS's marshalDataSubmessage/parseDataSubmessage (RTPS 2.3 §9.4.5.3) byte-for-byte.",
+      "text": "The system shall encode a DATA submessage body as extraFlags(2, zero) + octetsToInlineQos(2, always 16) + readerId(4) + writerId(4) + seqNum(8) + serialised payload, and shall decode the same layout back into reader/writer EntityId, SequenceNumber, and an optional payload (present only when the D flag is set and body bytes remain), matching go-DDS's marshalDataSubmessage/parseDataSubmessage (RTPS 2.3 \u00a79.4.5.3) byte-for-byte.",
       "category": "functional",
       "criticality": "high"
     },
@@ -1192,6 +1192,69 @@
       "id": "REQ-RTPS-042",
       "title": "SPDP peer-discovery bridge into SEDP",
       "text": "The system shall notify a listener with a copy of every ParticipantProxy SPDP stores from a decoded announcement, including repeat announcements from an already-known peer, and the participant runtime shall forward each into SEDP's new-peer announcement handling, matching go-DDS's spdpService.handlePacket calling sedpService.onNewPeer directly on every successfully decoded announcement.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-043",
+      "title": "HEARTBEAT submessage codec",
+      "text": "The system shall encode and decode a HEARTBEAT submessage (reader/writer entity IDs, first and last sequence number, monotonically increasing count) as a 4-byte submessage header plus a 28-byte body, matching go-DDS's marshalHeartbeat/parseHeartbeat byte-for-byte; decode shall never panic on truncated input.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-044",
+      "title": "ACKNACK submessage codec",
+      "text": "The system shall encode and decode an ACKNACK submessage (reader/writer entity IDs, base sequence number, a fixed 32-bit missing-sequence-number bitmap, monotonically increasing count) as a 4-byte submessage header plus a 28-byte body, matching go-DDS's marshalAckNack/parseAckNack byte-for-byte; decode shall never panic on truncated input.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-045",
+      "title": "GAP submessage codec",
+      "text": "The system shall encode a GAP submessage declaring a contiguous inclusive range of permanently-unavailable sequence numbers as a 4-byte submessage header plus a 28-byte body (gapList bitmapBase = gapEnd.low + 1, numBits = 0), matching go-DDS's marshalGAP byte-for-byte.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-046",
+      "title": "Per-writer send-history retention",
+      "text": "The system shall retain, per reliable writer, the last 256 sent RTPS wire messages in a fixed-size ring buffer keyed by full 64-bit sequence number, retrievable by sequence number while retained and reporting the lowest/highest retained sequence number, matching go-DDS's sendHistory (store/get/firstLast) behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-047",
+      "title": "Per-remote-writer receive gap tracking",
+      "text": "The system shall track, per reliable reader per remote writer, a cumulative-ACK watermark that advances only over a contiguous run of received sequence numbers, buffering out-of-order arrivals, and shall compute the ACKNACK base and 32-bit missing-sequence-number bitmap for a given upper bound, matching go-DDS's recvTracker (initExpected/record/missing) behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-048",
+      "title": "Bounded out-of-order buffering",
+      "text": "The system shall bound the receive-side gap tracker's out-of-order buffer to sequence numbers within 8192 of the current watermark, so a misbehaving or malicious writer cannot cause unbounded memory growth, matching go-DDS's maxReorderAhead.",
+      "category": "concurrency",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-049",
+      "title": "Heartbeat period constant",
+      "text": "The system shall use a 200-millisecond period for a reliable writer's periodic HEARTBEAT ticker, matching go-DDS's heartbeatPeriod constant.",
+      "category": "functional",
+      "criticality": "low"
+    },
+    {
+      "id": "REQ-RTPS-050",
+      "title": "Reliable writer/reader runtime wiring",
+      "text": "The system shall, for a reliable writer, store every written sample in its send history and send a HEARTBEAT immediately after each write and periodically thereafter; shall, on receipt of a DATA or HEARTBEAT submessage, update every accepting reliable reader's gap tracker and send an ACKNACK back to the sender when a gap is detected; and shall, on receipt of an ACKNACK, advance the writer's acknowledged watermark, retransmit each still-retained requested sample to every matched reader locator, and send a GAP for any requested range already evicted from history, matching go-DDS's rtpsWriter.sendHeartbeatLocked/notifyReliableReaders/handleHeartbeat/handleAckNack/advanceAcked behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-051",
+      "title": "Reliable reader registration",
+      "text": "The system shall register a new local reliable reader the same way as a BestEffort reader (entity-id assignment, SEDP registration, matched-source pre-population) plus a lazily-populated per-remote-writer gap-tracker table, matching go-DDS's NewSubscriber registration for a reliable rtpsReader.",
       "category": "functional",
       "criticality": "high"
     }
