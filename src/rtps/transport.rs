@@ -347,15 +347,21 @@ fn into_tokio(socket: Socket) -> io::Result<UdpSocket> {
     UdpSocket::from_std(std_socket)
 }
 
-/// Build a `socket2::Socket` for UDP with `SO_REUSEADDR` set, and
-/// (when `reuse_port` is true) `SO_REUSEPORT` where the platform supports
-/// it. All through `socket2`'s safe API — no raw libc calls, no `unsafe`
+/// Build a `socket2::Socket` for UDP, optionally `shared`: when `shared` is
+/// true, sets `SO_REUSEADDR` and (where the platform supports it)
+/// `SO_REUSEPORT`, so that multiple sockets — standing in for multiple
+/// local participants — can all bind the same port (used for the
+/// multicast path). When `shared` is false, neither option is set, so a
+/// second bind attempt on a port already held by a unicast socket fails
+/// with `EADDRINUSE` rather than silently succeeding — which is what makes
+/// [`RtpsSocket::bind_unicast_v4`]/`_v6`'s port-retry loop meaningful. All
+/// through `socket2`'s safe API — no raw libc calls, no `unsafe`
 /// (REQ-ASIL-002 / REQ-MEM-001).
 //fusa:req REQ-RTPS-019
-fn new_socket2(domain: Domain, reuse_port: bool) -> io::Result<Socket> {
+fn new_socket2(domain: Domain, shared: bool) -> io::Result<Socket> {
     let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
-    if reuse_port {
+    if shared {
+        socket.set_reuse_address(true)?;
         // SO_REUSEPORT has no Windows equivalent; socket2 only exposes
         // `set_reuse_port` on Unix targets, so this is naturally a no-op
         // (compiled out) on Windows rather than an error.
