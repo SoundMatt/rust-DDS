@@ -10,10 +10,13 @@
 //! wire-level CDR") are pure, synchronous `encode`/`decode` for wire types,
 //! no I/O. `transport` (sub-phase 3, "UDP transport") is the first module
 //! in this tree with actual I/O — async on tokio, per `transport`'s own
-//! module docs. No participant/discovery dispatch logic yet — that is later
-//! sub-phases. This module tree is internal: it is **not** re-exported from
-//! the crate root and is **not** wired into the public
-//! `Participant`/`Publisher`/`Subscriber` API yet.
+//! module docs. `spdp` (sub-phase 4, "SPDP") is the first module with
+//! participant/discovery dispatch logic — periodic multicast announce,
+//! decode-and-store of peer announcements, lease-based eviction — built on
+//! top of `cdr`'s `PL_CDR_LE` codec and `transport`'s sockets. SEDP and
+//! later sub-phases follow the same layering. This module tree is
+//! internal: it is **not** re-exported from the crate root and is **not**
+//! wired into the public `Participant`/`Publisher`/`Subscriber` API yet.
 //!
 //! Byte layout for every type here is derived from go-DDS's `rtps` package
 //! (`github.com/SoundMatt/go-DDS`, RTPS 2.3), which the roadmap designates
@@ -32,6 +35,7 @@ pub mod cdr;
 pub mod guid;
 pub mod locator;
 pub mod message;
+pub mod spdp;
 pub mod transport;
 
 use thiserror::Error;

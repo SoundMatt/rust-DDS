@@ -170,6 +170,29 @@ Sub-phases, scoped against the go-DDS file breakdown:
 4. **SPDP** (Simple Participant Discovery) — multicast announce/listen
    at a periodic interval with jitter, known-participants table. Mirrors
    `spdp.go` (379 LOC).
+   **Done** — landed in [rust-DDS#25](https://github.com/SoundMatt/rust-DDS/pull/25)
+   as `src/rtps/spdp.rs`: `SpdpConfig`/`ParticipantProxy`,
+   `build_participant_data`/`parse_participant_data` (the `PL_CDR_LE`
+   ParticipantProxy payload codec, including the zero-address
+   metatraffic/default-locator fill-in from the announcement's UDP sender
+   address), and `SpdpService` — a `tokio::time::interval`-driven announce
+   loop (immediate first send, then periodic with optional jitter), a
+   receive loop consuming `transport::RtpsSocket::spawn_receive_loop`'s
+   `mpsc::Receiver` and dispatching into the known-peers table (self-filtered
+   by `GuidPrefix`), and a once-per-second lease-eviction loop — each
+   independently stoppable via `.abort()` on its `JoinHandle`, matching
+   `transport.rs`'s established idiom. Also adds the generic DATA-submessage
+   encode/decode and submessage-iteration helpers (`encode_data_submessage`/
+   `decode_data_submessage`/`SubmessageIter`/`wrap_in_rtps_message`) to
+   `src/rtps/message.rs`, and the builtin-endpoint bitmask constants to
+   `src/rtps/guid.rs` — both, like go-DDS's own file layout, shared
+   framing/identifier pieces rather than SPDP-specific. Verified
+   byte-for-byte against real go-DDS reference output (`REQ-RTPS-021`..`028`).
+   Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001). Internal only — not yet wired
+   into `Participant`/`Publisher`/`Subscriber`; consumed by SEDP starting
+   with sub-phase 5. Not in scope here (later Tier 1/2 work): SEDP peer
+   notification, the `DiscoveryPlugin` authentication hook, and the
+   participant-liveliness callback.
 5. **SEDP** (Simple Endpoint Discovery) — unicast endpoint announcement
    between participants once SPDP has found them. Mirrors `sedp.go`
    (343 LOC).

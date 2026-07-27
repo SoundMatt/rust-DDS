@@ -1040,6 +1040,62 @@
       "text": "The system shall spawn one tokio::task per UDP socket that loops UdpSocket::recv_from and pushes each received datagram (payload plus sender address) into an internal bounded mpsc channel, dropping the datagram if the channel is full and exiting the loop if the channel's receiver has been dropped, replacing go-DDS's single dataReceiveLoop goroutine that multiplexes all sockets.",
       "category": "functional",
       "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-021",
+      "title": "DATA submessage encode/decode",
+      "text": "The system shall encode a DATA submessage body as extraFlags(2, zero) + octetsToInlineQos(2, always 16) + readerId(4) + writerId(4) + seqNum(8) + serialised payload, and shall decode the same layout back into reader/writer EntityId, SequenceNumber, and an optional payload (present only when the D flag is set and body bytes remain), matching go-DDS's marshalDataSubmessage/parseDataSubmessage (RTPS 2.3 §9.4.5.3) byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-022",
+      "title": "Submessage iteration over an RTPS message body",
+      "text": "The system shall iterate the submessages in an RTPS message body by reading each 4-byte SubmessageHeader and advancing by its octetsToNextHeader length, stopping cleanly once fewer than 4 bytes remain and yielding a decode error (without panicking) if a declared length would run past the end of the input, matching go-DDS's parseSubmessages behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-023",
+      "title": "RTPS message wrapping",
+      "text": "The system shall prepend the 20-byte RTPS Header to already-encoded submessage bytes to form a complete RTPS message, matching go-DDS's wrapInRTPSMessage byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-024",
+      "title": "Builtin endpoint availability bitmask",
+      "text": "The system shall provide bit constants for the six SPDP/SEDP builtin endpoints (SPDP announcer/detector, SEDP publication announcer/detector, SEDP subscription announcer/detector) at the same bit positions as go-DDS's rtps/guid.go, such that advertising all six yields PID_BUILTIN_ENDPOINT_SET = 0x3f.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-025",
+      "title": "SPDP ParticipantProxy data encoding",
+      "text": "The system shall encode an SPDP ParticipantProxy PL_CDR_LE payload containing, in order, the protocol version, vendor ID, participant GUID, builtin endpoint set, metatraffic unicast locator, default unicast locator, and participant lease duration, with the two unicast locators carrying an all-zero (0.0.0.0) address, matching go-DDS's buildParticipantData byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-026",
+      "title": "SPDP ParticipantProxy data decoding with zero-address locator fill-in",
+      "text": "The system shall decode an SPDP ParticipantProxy PL_CDR_LE payload field-by-field (tolerating missing parameters, which retain their default/zero value), and for any metatraffic or default unicast locator whose address is all-zero shall fill in the IPv4 address of the announcement's UDP sender, matching go-DDS's parseParticipantData behaviourally; malformed input (an invalid PL_CDR_LE header) shall yield no result rather than panicking.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-027",
+      "title": "SPDP periodic multicast announcement with jitter",
+      "text": "The system shall send an SPDP announcement to the domain's SPDP multicast group immediately on startup and then at a configurable periodic interval (default 2 seconds), optionally preceded by a uniformly-random delay bounded by a configurable jitter duration before each periodic (not the initial) announcement, matching go-DDS's spdpService.announceLoop behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-028",
+      "title": "SPDP known-participants table with lease-based eviction and self-filtering",
+      "text": "The system shall maintain a table of known remote participants keyed by GUID prefix, updating each entry's last-seen time on every valid SPDP announcement received (applying a default 10-second lease when the peer's announcement did not carry one), shall periodically (once per second) evict any peer whose lease has expired, and shall ignore SPDP announcements whose GUID prefix matches the local participant's own, matching go-DDS's spdpService.storePeer/evictLoop/handlePacket behaviourally.",
+      "category": "functional",
+      "criticality": "high"
     }
   ]
 }
