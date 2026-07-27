@@ -354,6 +354,37 @@ Sub-phases, scoped against the go-DDS file breakdown:
    41 LOC). Zero-copy loan API (`loan.go`, 66 LOC) can be deferred to the
    shared-memory transport tier since it's not meaningful without a
    zero-copy transport underneath it.
+   **Done** — landed in [rust-DDS#30](https://github.com/SoundMatt/rust-DDS/pull/30)
+   as `src/rtps/persist.rs` and `src/rtps/wildcard.rs`: `persist_load`/
+   `persist_flush`/`persist_path` (the disk-backed last-sample cache, one
+   file per topic — a 4-byte little-endian length prefix followed by the
+   raw payload bytes, byte-exact against real go-DDS output), and
+   `topic_matches` (MQTT-style `+`/`#` topic-pattern matching, a direct
+   port of go-DDS's `TopicMatches`). `src/rtps/participant.rs` wires both
+   in: `RtpsParticipant::new_with_persistent_history` (go-DDS's
+   `WithPersistentHistory` functional option, as a second constructor
+   alongside the existing `RtpsParticipant::new`) makes `RtpsWriter::write`
+   flush the topic's last payload to disk on every write, and adds
+   `RtpsParticipant::new_transient_local_reader`/
+   `new_reliable_transient_local_reader` — late-joiner delivery of a
+   topic's last sample from an in-memory cache first, falling back to disk
+   via `persist_load`, matching go-DDS's `NewSubscriber` TransientLocal
+   block exactly (including which failure exceeds the disk-fallback
+   guard); `RtpsParticipant::dispatch_to_readers` matches a reader's
+   (possibly wildcarded) registered topic against a writer's concrete
+   topic with `topic_matches` as a fallback to exact equality, exactly
+   where go-DDS's own `dispatchToReaders` calls `TopicMatches` — and
+   nowhere else: go-DDS's `sedp.go` endpoint matching uses plain `==`
+   throughout, no `TopicMatches` call anywhere in that file, so `sedp.rs`'s
+   existing literal-equality endpoint matching is intentionally unchanged.
+   Verified against real go-DDS reference output for the persisted-file
+   byte layout and go-DDS's actual `TopicMatches` output for a fixed table
+   of pattern/topic pairs (`REQ-RTPS-056`, `REQ-RTPS-057`). Zero `unsafe`
+   (REQ-ASIL-002/REQ-MEM-001). Internal only — not yet wired into
+   `Participant`/`Publisher`/`Subscriber`. This closes out Tier 1 (RTPS
+   wire-protocol port); the zero-copy loan API (`loan.go`) remains
+   deferred to the shared-memory transport tier (v0.4) per this
+   sub-phase's own scoping above.
 
 **Async vs. sync — the concrete call for this crate.** rust-DDS is already
 committed to `tokio` (`Cargo.toml`: `tokio = { version = "1", features =
@@ -549,7 +580,7 @@ harder to change.
 ### Planned — v0.3 — Reliable QoS (Tier 1)
 
 - [x] Reliable delivery with HEARTBEAT / ACKNACK retransmission
-- [ ] TransientLocal durability over RTPS (SEDP history cache)
+- [x] TransientLocal durability over RTPS (SEDP history cache)
 - [x] Fragment support for large payloads (DATA_FRAG)
 - [ ] Deadline QoS subscriber enforcement with callback
 
