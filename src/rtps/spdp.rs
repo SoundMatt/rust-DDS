@@ -389,6 +389,8 @@ pub struct SpdpService {
     send_socket: Arc<RtpsSocket>,
     seq_counter: AtomicU32,
     peers: RwLock<HashMap<GuidPrefix, ParticipantProxy>>,
+    /// Set via [`SpdpService::set_peer_listener`]; see that method's docs.
+    peer_listener: RwLock<Option<mpsc::UnboundedSender<ParticipantProxy>>>,
     announces_sent: AtomicU64,
     announces_received: AtomicU64,
     peer_evictions: AtomicU64,
@@ -411,6 +413,7 @@ impl SpdpService {
             send_socket,
             seq_counter: AtomicU32::new(0),
             peers: RwLock::new(HashMap::new()),
+            peer_listener: RwLock::new(None),
             announces_sent: AtomicU64::new(0),
             announces_received: AtomicU64::new(0),
             peer_evictions: AtomicU64::new(0),
@@ -420,6 +423,29 @@ impl SpdpService {
     /// This service's configuration.
     pub fn config(&self) -> &SpdpConfig {
         &self.config
+    }
+
+    /// Registers `tx` to receive a copy of every [`ParticipantProxy`] this
+    /// service stores from a decoded SPDP announcement — including repeat
+    /// announcements from an already-known peer, not just newly-seen ones
+    /// (matching go-DDS's `spdpService.handlePacket`, which calls
+    /// `s.p.sedp.onNewPeer(proxy)` unconditionally on every successfully
+    /// decoded announcement, not gated on "is this peer new"). At most one
+    /// listener is kept; a later call replaces an earlier one.
+    ///
+    /// This exists for the same reason [`super::sedp::SedpService::set_match_listener`]
+    /// does: go-DDS's `spdpService` reaches directly into its owning
+    /// `*participant` (`s.p.sedp.onNewPeer`) to notify SEDP of a
+    /// newly-observed peer; `SpdpService` predates the RTPS participant
+    /// runtime type that sub-phase 6 introduces (`super::participant`), so
+    /// it cannot depend on `sedp`/`participant` directly without inverting
+    /// the module dependency graph (`sedp` already depends on `spdp`). A
+    /// future caller — [`super::participant::RtpsParticipant::spawn_spdp_peer_listener`] —
+    /// bridges the two by forwarding each event into
+    /// [`super::sedp::SedpService::on_new_peer`].
+    //fusa:req REQ-RTPS-042
+    pub async fn set_peer_listener(&self, tx: mpsc::UnboundedSender<ParticipantProxy>) {
+        *self.peer_listener.write().await = Some(tx);
     }
 
     fn next_seq_num(&self) -> u32 {
@@ -569,8 +595,17 @@ impl SpdpService {
         if proxy.lease_duration.is_zero() {
             proxy.lease_duration = DEFAULT_LEASE_DURATION;
         }
-        let mut peers = self.peers.write().await;
-        peers.insert(proxy.guid.prefix, proxy).is_none()
+        let is_new = {
+            let mut peers = self.peers.write().await;
+            peers.insert(proxy.guid.prefix, proxy.clone()).is_none()
+        };
+        if let Some(tx) = self.peer_listener.read().await.as_ref() {
+            // Unconditional, matching go-DDS's own per-packet call — see
+            // set_peer_listener's docs. A closed receiver just means no one
+            // is listening (yet); dropping the event is fine.
+            let _ = tx.send(proxy);
+        }
+        is_new
     }
 
     /// Removes every peer whose lease has expired (`now - last_seen >

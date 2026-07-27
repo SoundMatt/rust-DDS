@@ -1145,6 +1145,55 @@
       "text": "The system shall convert a UDPv4 or UDPv6 Locator to a SocketAddr usable as a UDP send destination, and shall return no result rather than panicking for a locator of any other kind or a port value that does not fit in 16 bits, matching go-DDS's Locator.udpAddr behaviourally.",
       "category": "functional",
       "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-036",
+      "title": "User-defined entity ID assignment",
+      "text": "The system shall derive a user-defined writer or reader EntityId from a per-participant strictly-increasing counter, packing the counter's low 24 bits into the first three octets and a fixed entity-kind octet (0x03 for a writer, 0x04 for a reader) into the fourth, matching go-DDS's entityIdForWriter/entityIdForReader byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-037",
+      "title": "BestEffort DATA submessage composition on write",
+      "text": "The system shall, on each local write, assign the next per-writer sequence number, wrap the payload in a CDR_LE encapsulation header, encode a DATA submessage carrying it (with no inline QoS and no history retained), and wrap the result in an RTPS message, matching go-DDS's rtpsWriter.Write's BestEffort (non-reliable) path byte-for-byte for the composition of already-verified primitives.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-038",
+      "title": "Sample dispatch to matched local readers by topic and writer GUID",
+      "text": "The system shall deliver a written or received sample to every local reader whose topic matches (when a topic filter is supplied) and which accepts the sample's source writer GUID, where a reader with no SEDP-matched sources accepts only writers sharing its own participant's GUID prefix, and a reader with at least one SEDP-matched source additionally accepts any explicitly-matched remote writer GUID, matching go-DDS's dispatchToReaders/rtpsReader.acceptsSource behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-039",
+      "title": "Asynchronous SEDP writer-match propagation to registered readers",
+      "text": "The system shall notify a listener when SEDP's receive loop matches a newly-discovered remote writer against an already-registered local reader's topic, and the participant runtime shall add that writer's GUID to the reader's accepted-source set on receipt, matching go-DDS's onRemoteWriter calling rtpsReader.addSourceGUID in-line.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-040",
+      "title": "Inbound DATA submessage decode and dispatch",
+      "text": "The system shall decode each received datagram as an RTPS message, ignore it if its GUID prefix matches the local participant, and for each DATA submessage unwrap its CDR payload and dispatch it to matched local readers keyed by writer GUID; malformed input and non-DATA submessages shall be silently ignored rather than causing a panic, matching go-DDS's handleDataPacket's BestEffort path behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-041",
+      "title": "RTPS participant runtime writer/reader registration",
+      "text": "The system shall assign a fresh entity ID and register a new local writer or reader with SEDP on creation, shall return a sample-receiving handle sharing the same queue/back-pressure type as the crate's in-process mock transport, and shall remove a reader from the dispatch table on unsubscribe, matching go-DDS's NewPublisher/NewSubscriber/rtpsReader.Unsubscribe registration bookkeeping.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-042",
+      "title": "SPDP peer-discovery bridge into SEDP",
+      "text": "The system shall notify a listener with a copy of every ParticipantProxy SPDP stores from a decoded announcement, including repeat announcements from an already-known peer, and the participant runtime shall forward each into SEDP's new-peer announcement handling, matching go-DDS's spdpService.handlePacket calling sedpService.onNewPeer directly on every successfully decoded announcement.",
+      "category": "functional",
+      "criticality": "high"
     }
   ]
 }

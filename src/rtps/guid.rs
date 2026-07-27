@@ -162,6 +162,42 @@ impl Guid {
         let entity = EntityId::decode(&buf[GuidPrefix::LEN..Self::LEN])?;
         Ok(Guid { prefix, entity })
     }
+
+    /// Flattens this `Guid` into the plain 16-byte array shape used by
+    /// [`crate::types::Sample::writer_guid`] (`prefix` bytes first, then
+    /// `entity` bytes — the same field order as [`Guid::encode`]). Matches
+    /// go-DDS's `dispatchToReaders`'s
+    /// `copy(writerDDS[:12], source.Prefix[:]); copy(writerDDS[12:],
+    /// source.Entity[:])`.
+    //fusa:req REQ-RTPS-036
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..GuidPrefix::LEN].copy_from_slice(&self.prefix.0);
+        out[GuidPrefix::LEN..].copy_from_slice(&self.entity.0);
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// User-defined entity ID assignment (RTPS 2.3 §9.3.1.2 "no key" kinds)
+// ---------------------------------------------------------------------------
+
+/// Builds a user-defined writer `EntityId` from a per-participant, strictly
+/// increasing counter `n` (the caller is expected to start `n` at 1 and
+/// never reuse a value). Entity-kind octet `0x03` ("no key" writer),
+/// matching go-DDS's `entityIdForWriter` byte-for-byte:
+/// `EntityId{byte(n>>16), byte(n>>8), byte(n), 0x03}`.
+//fusa:req REQ-RTPS-036
+pub fn entity_id_for_writer(n: u32) -> EntityId {
+    EntityId([(n >> 16) as u8, (n >> 8) as u8, n as u8, 0x03])
+}
+
+/// Builds a user-defined reader `EntityId` from a per-participant, strictly
+/// increasing counter `n`. Entity-kind octet `0x04` ("no key" reader),
+/// matching go-DDS's `entityIdForReader` byte-for-byte.
+//fusa:req REQ-RTPS-036
+pub fn entity_id_for_reader(n: u32) -> EntityId {
+    EntityId([(n >> 16) as u8, (n >> 8) as u8, n as u8, 0x04])
 }
 
 // ---------------------------------------------------------------------------
@@ -329,5 +365,53 @@ mod tests {
             | ENDPOINT_SEDP_SUB_ANNOUNCER
             | ENDPOINT_SEDP_SUB_DETECTOR;
         assert_eq!(all, 0x3f);
+    }
+
+    // Reference bytes reproduced from go-DDS's actual rtps package (real
+    // entityIdForWriter/entityIdForReader, not reimplemented). Go
+    // reproduction (package-local scratch test file,
+    // `rtps/zzrepro_entityid_test.go`, never committed to go-DDS, deleted
+    // after use):
+    //
+    //   w1, r1 := entityIdForWriter(1), entityIdForReader(1)
+    //   w2, r2 := entityIdForWriter(0x010203), entityIdForReader(0x010203)
+    //   fmt.Printf("%x\n", [4]byte(w1)) // -> 00000103
+    //   fmt.Printf("%x\n", [4]byte(r1)) // -> 00000104
+    //   fmt.Printf("%x\n", [4]byte(w2)) // -> 01020303
+    //   fmt.Printf("%x\n", [4]byte(r2)) // -> 01020304
+    //
+    // Full run: `go test ./rtps/... -run TestZZReproEntityIDBytes -v`
+    // (go-DDS commit 9d81543 / rust-DDS branch feat/rtps-bestEffort).
+
+    //fusa:test REQ-RTPS-036
+    #[test]
+    fn entity_id_for_writer_matches_go_dds_reference() {
+        assert_eq!(entity_id_for_writer(1), EntityId([0x00, 0x00, 0x01, 0x03]));
+        assert_eq!(
+            entity_id_for_writer(0x010203),
+            EntityId([0x01, 0x02, 0x03, 0x03])
+        );
+    }
+
+    //fusa:test REQ-RTPS-036
+    #[test]
+    fn entity_id_for_reader_matches_go_dds_reference() {
+        assert_eq!(entity_id_for_reader(1), EntityId([0x00, 0x00, 0x01, 0x04]));
+        assert_eq!(
+            entity_id_for_reader(0x010203),
+            EntityId([0x01, 0x02, 0x03, 0x04])
+        );
+    }
+
+    //fusa:test REQ-RTPS-036
+    #[test]
+    fn guid_to_bytes_matches_field_order() {
+        let g = Guid {
+            prefix: ascending_prefix(),
+            entity: ENTITYID_PARTICIPANT,
+        };
+        let mut expected = Vec::new();
+        g.encode(&mut expected);
+        assert_eq!(g.to_bytes().to_vec(), expected);
     }
 }
