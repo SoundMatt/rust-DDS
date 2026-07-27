@@ -137,6 +137,13 @@ Sub-phases, scoped against the go-DDS file breakdown:
    top-level `cdr` package, 348 LOC, is a separate and larger thing) — Tier
    1 only needs enough CDR to get RTPS framing right, not to serialize
    application types.
+   **Done** — landed in [rust-DDS#23](https://github.com/SoundMatt/rust-DDS/pull/23)
+   as `src/rtps/cdr.rs`: the `PL_CDR_LE` parameter-list encoder/decoder
+   (`PlCdrEncoder`/`PlCdrDecoder`) and PID table, plus the plain
+   `CDR_LE`/`PL_CDR_LE` payload encapsulation wrap/unwrap helpers, verified
+   byte-for-byte against real go-DDS reference output (`REQ-RTPS-011`..`015`,
+   `REQ-RTPS-009`). Internal only — not yet wired into `Participant`/
+   `Publisher`/`Subscriber`; consumed by SPDP/SEDP starting with sub-phase 4.
 3. **UDP transport** — socket setup per the RTPS 2.3 §9.6.1 port formula
    (`metaMulticast(domain) = 7400 + 250*domain`,
    `metaUnicast(domain,i) = 7400 + 250*domain + 10 + 2*i`,

@@ -26,6 +26,7 @@
 //! decode paths that accept untrusted/external bytes (REQ-ASIL-003):
 //! malformed or truncated input returns `Err(RtpsDecodeError)`, never panics.
 
+pub mod cdr;
 pub mod guid;
 pub mod locator;
 pub mod message;
@@ -46,4 +47,9 @@ pub enum RtpsDecodeError {
     /// RTPS message did not start with the `"RTPS"` magic bytes.
     #[error("rtps: bad magic bytes: expected \"RTPS\"")]
     BadMagic,
+    /// CDR/PL_CDR payload did not start with a recognised encapsulation
+    /// scheme identifier.
+    //fusa:req REQ-RTPS-014
+    #[error("rtps: unrecognised CDR encapsulation scheme: 0x{got:04x}")]
+    InvalidCdrScheme { got: u16 },
 }

@@ -970,6 +970,41 @@
       "text": "The system shall encode a SubmessageHeader as 4 bytes: 1-byte submessageId + 1-byte flags + 2-byte little-endian octetsToNextHeader, matching go-DDS's rtps submessage header layout (RTPS 2.3 \u00a79.4.2) byte-for-byte, including the DATA/GAP/HEARTBEAT/ACKNACK/INFO_TS submessage ID constants and the Endianness/InlineQos/Data flag bits.",
       "category": "functional",
       "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-011",
+      "title": "PL_CDR_LE parameter-list encoder header and parameter encoding",
+      "text": "The system shall encode a PL_CDR_LE parameter list starting with a 4-byte encapsulation header (2-byte little-endian scheme 0x0003 + 2 zero option bytes) followed by zero or more parameters, each a 4-byte little-endian (PID, length) pair followed by the parameter value, matching go-DDS's rtps.plCDREncoder (RTPS 2.3 \u00a710.2/\u00a79.6.3) byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-012",
+      "title": "CDR parameter value padding to a 4-byte boundary",
+      "text": "The system shall pad every encoded parameter value up to the next multiple of 4 bytes with zero bytes and record the padded length (not the raw value length) in the parameter's length field, matching go-DDS's rtps.plCDREncoder.addParam byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-013",
+      "title": "CDR string parameter encoding",
+      "text": "The system shall encode a CDR string parameter as a 4-byte little-endian length (character count including a null terminator) followed by the UTF-8 bytes of the string and a single null terminator byte, before parameter padding is applied, matching go-DDS's rtps.plCDREncoder.addString byte-for-byte.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-014",
+      "title": "PL_CDR_LE parameter-list decoding",
+      "text": "The system shall decode a PL_CDR_LE parameter list by iterating (PID, length, value) triples, skipping PID_PAD entries, terminating at PID_SENTINEL, and shall reject a payload whose first 4 bytes are not the PL_CDR_LE scheme, matching go-DDS's rtps.plCDRDecoder behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-015",
+      "title": "CDR_LE/PL_CDR_LE payload encapsulation wrap/unwrap",
+      "text": "The system shall prepend a 4-byte CDR_LE encapsulation header (scheme + zero options) to a raw payload, and shall strip a 4-byte encapsulation header accepting either the CDR_LE or PL_CDR_LE scheme, matching go-DDS's rtps.cdrWrapPayload/cdrUnwrapPayload byte-for-byte.",
+      "category": "functional",
+      "criticality": "medium"
     }
   ]
 }
