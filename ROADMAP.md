@@ -1164,7 +1164,78 @@ harder to change.
   multi-task concurrent-check exercise), plus additional coverage
   (`is_empty`, a replay not resetting the originally-recorded timestamp,
   `Send + Sync`, and the `ReplayError` display text).
-- [ ] HMAC-SHA-256 discovery authentication
+- [x] HMAC-SHA-256 discovery authentication — landed as
+  `src/security/discovery.rs`'s `DiscoveryPlugin` trait and
+  `HmacDiscoveryPlugin`, and wired into `src/rtps/spdp.rs`'s
+  `SpdpService` announce-send / receive-verify path via
+  `SpdpConfig::discovery_plugin` (`Option<Arc<dyn DiscoveryPlugin>>`, set
+  builder-style via `SpdpConfig::with_discovery_plugin`). Direct port of
+  go-DDS's `security.DiscoveryPlugin` interface and
+  `security.HMACDiscoveryPlugin` (`github.com/SoundMatt/go-DDS`,
+  `security/discovery.go`), plus its own local `rtps.DiscoveryPlugin`
+  interface (`rtps/participant.go`) threaded through participant
+  construction (`WithDiscoverySecurity`) and into `spdpService.
+  buildParticipantData`/`handlePacket` (`rtps/spdp.go`) — the DiscoveryPlugin
+  authentication hook Tier 1 sub-phase 4 (SPDP, this crate's own
+  `rtps::spdp` module docs) explicitly deferred, and the dependency
+  ROADMAP.md itself called out as gating Tier 2 security work on Tier 1
+  landing (now fully landed, v0.13). `sign_discovery(guid_prefix)` returns
+  a 32-byte HMAC-SHA-256 tag over a fixed context string
+  (`"go-dds-discovery-v1"`, byte-exact match) followed by `guid_prefix`;
+  `verify_discovery(guid_prefix, tag)` rejects a nil/empty tag outright and
+  otherwise recomputes and compares in constant time
+  (`hmac::Mac::verify_slice`). `build_participant_data` embeds the tag as a
+  new `PL_CDR_LE` parameter, `PID_DISCOVERY_TOKEN` (`0x8001`, a
+  vendor-specific PID already reserved in `src/rtps/cdr.rs` ahead of this
+  item landing, in the OMG vendor-extension range), appended after the
+  lease duration and before the sentinel — matching go-DDS's
+  `enc.addParam(pidDiscoveryToken, ...)` placement exactly; omitted
+  entirely when no plugin is configured, leaving every earlier sub-phase's
+  byte-exact SPDP output unchanged. `SpdpService::handle_packet` mirrors
+  go-DDS's receive-side check: a peer's announcement is silently discarded
+  (never stored, never notified to SEDP) if its token does not verify
+  against the *sender's* `GuidPrefix` (from the RTPS message header, not
+  any `PID_PARTICIPANT_GUID` claimed in the payload) — indistinguishable
+  from a datagram that never arrived, matching go-DDS's own `return nil` at
+  the same point in `handlePacket`. Scoped to SPDP only, per this
+  milestone's own checklist item name ("discovery" authentication, not
+  "endpoint"): go-DDS's `HMACDiscoveryPlugin` also implements
+  `SignEndpoint`/`VerifyEndpoint` (its `rtps.EndpointPlugin` interface,
+  SEDP endpoint authentication under a second, distinct HMAC context) —
+  left for a future item, not implemented here. One correction to an
+  earlier, unverified claim elsewhere in this crate: `hmac.rs`'s own doc
+  comment speculates that "the separate discovery HMAC plugin ... does
+  enforce a 16-byte minimum" key length; inspecting a fresh go-DDS clone's
+  actual `NewHMACDiscoveryPlugin` shows no such check — like
+  `NewHMACPlugin`, it copies the key unconditionally and accepts any
+  length, including empty, and this port matches that verified behaviour,
+  not the earlier speculation. Adds REQ-SEC-028/REQ-SEC-029 (continuing
+  after REQ-SEC-026/027) with full `fusa:req`/`fusa:test` traceability.
+  Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001); no `.unwrap()` on any
+  user-visible (non-test) path (REQ-ASIL-003) — including HMAC key-setup
+  failure (never observed in practice for arbitrary-length keys, per RFC
+  2104, but still handled explicitly) surfaced as a fail-closed empty
+  tag/`false` rather than a panic. Byte-exact against go-DDS: unit tests
+  pin `sign_discovery` output for five `(key, guid_prefix)` pairs plus one
+  non-12-byte-prefix case against reference vectors generated directly
+  from a fresh go-DDS clone's own `security.HMACDiscoveryPlugin.
+  SignDiscovery`, not hand-derived. Unit-tested per this crate's
+  established per-module convention: go-DDS reference-vector byte
+  equality, sign/verify round-trip, wrong-key/wrong-prefix/tampered-tag/
+  truncated-tag/empty-tag rejection, different-prefixes-different-tags,
+  cross-instance same-key interop, arbitrary key length acceptance,
+  key-copied-not-shared (the Rust-ownership-model analogue of go-DDS's
+  `TestHMACDiscoveryPlugin_KeyIsNotShared`), `Rekey` changing signed
+  output/invalidating an old tag/interoperating under the new key,
+  `Box<dyn DiscoveryPlugin>`/`Arc<dyn DiscoveryPlugin>` object-safety, and
+  a multi-task `tokio::spawn` concurrency test — plus, at the `rtps::spdp`
+  wiring layer, a full announce-send/receive-verify round trip
+  (`SpdpService::handle_packet` accepting a same-key-signed peer and
+  rejecting an unsigned, wrong-key-signed, or tampered-token one), byte-level
+  `PID_DISCOVERY_TOKEN` embed/omit/extract coverage, and an `SpdpConfig`
+  equality test covering the hand-written `PartialEq`/`Eq`/`Debug` impls
+  `SpdpConfig::discovery_plugin`'s `Arc<dyn DiscoveryPlugin>` field required
+  in place of the struct's previous `#[derive(...)]`.
 
 ### Planned — v0.6 — Observability (Tier 5)
 
