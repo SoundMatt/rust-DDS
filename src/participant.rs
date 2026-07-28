@@ -303,6 +303,45 @@ pub trait Publisher: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// LoaningPublisher trait
+// ---------------------------------------------------------------------------
+
+/// Extends [`Publisher`] with pool-backed, allocation-free loaned-sample
+/// writes — `ROADMAP.md`'s "Planned — v0.4 — Shared-Memory Transport"
+/// milestone, second checklist item. Declared here (rather than inside
+/// `shmem`) so any future transport can implement it too, mirroring
+/// go-DDS's own placement of `dds.LoaningPublisher` next to `dds.Publisher`
+/// in its top-level `dds.go` rather than inside its `shmem` package;
+/// [`crate::shmem::ShmemLoaningPublisher`] is this trait's first
+/// implementation (see that module's docs) — go-DDS's `loan.go` zero-copy
+/// loan API, which Tier 1 sub-phase 9 (`rust-DDS#30`) deliberately
+/// deferred to the shared-memory transport milestone "since it's not
+/// meaningful without a zero-copy transport underneath it".
+///
+/// Use `loan` to obtain a pre-allocated buffer from the publisher's
+/// internal pool, write payload data into it, then call `commit` to
+/// publish it and return the buffer to the pool. `commit` calls the
+/// underlying [`Publisher::write`] internally; the buffer must not be used
+/// after `commit` returns.
+//fusa:req REQ-LOAN-001
+#[async_trait]
+pub trait LoaningPublisher: Publisher {
+    /// Returns a buffer with at least `size` bytes of capacity (and
+    /// `size` as its length, ready to write into directly), backed by
+    /// this publisher's internal pool. Returns `Error::LoanBuffer` if
+    /// `size` exceeds the pool's configured capacity, `Error::Closed` if
+    /// this publisher is closed.
+    //fusa:req REQ-LOAN-002
+    fn loan(&self, size: usize) -> Result<Vec<u8>, Error>;
+
+    /// Publishes `buf` (a buffer previously returned by `loan` on this
+    /// same publisher) and returns it to the pool for reuse. `buf` must
+    /// not be used after this call returns.
+    //fusa:req REQ-LOAN-003
+    async fn commit(&self, buf: Vec<u8>) -> Result<(), Error>;
+}
+
+// ---------------------------------------------------------------------------
 // Participant trait
 // ---------------------------------------------------------------------------
 

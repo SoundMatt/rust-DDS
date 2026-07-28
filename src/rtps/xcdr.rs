@@ -660,6 +660,7 @@ mod tests {
 
     //fusa:test REQ-RTPS-063
     #[test]
+    #[allow(clippy::approx_constant)] // byte-exact go-DDS reference vector; not meant to be PI
     fn float32_matches_go_dds_reference() {
         let mut e = XcdrEncoder::new();
         e.write_f32(3.14);
@@ -668,6 +669,7 @@ mod tests {
 
     //fusa:test REQ-RTPS-063
     #[test]
+    #[allow(clippy::approx_constant)] // byte-exact go-DDS reference vector; not meant to be E
     fn float64_matches_go_dds_reference() {
         let mut e = XcdrEncoder::new();
         e.write_f64(2.718281828);

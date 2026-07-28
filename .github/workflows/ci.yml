@@ -148,6 +148,24 @@ jobs:
       - name: pcap-fixture conformance (byte-exact go-DDS reference decode)
         run: cargo test --test rtps_pcap_conformance
 
+  shmem-interop:
+    name: shmem transport two-process interop (ROADMAP.md "Planned — v0.4")
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Two real `shmem-interop-peer` OS processes exchanging samples over
+      # a real per-topic rendezvous file (no shared in-process state), plus
+      # a late-joining reader started only after the writer process has
+      # already exited, proving `shmem::ShmemParticipant`'s cross-process
+      # TransientLocal fallback works with no writer process alive at all.
+      # `#[ignore]`d in the default `cargo test` sweep (real process
+      # spawning is unsuited to the cross-platform test matrix), so it
+      # only runs here — analogous to the `rtps-interop` job above.
+      - name: Live two-process shmem interop (rendezvous-file delivery + cross-process TransientLocal)
+        run: cargo test --release --test shmem_two_process_interop -- --ignored --test-threads=1
+
   cyclone-interop:
     name: RTPS interop against a live CycloneDDS peer (ROADMAP.md "Interop testing", deliverable 3/3)
     runs-on: ubuntu-latest
