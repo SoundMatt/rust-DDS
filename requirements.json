@@ -1334,6 +1334,34 @@
       "text": "The system's public UDP-backed participant shall, unless configured with multicast disabled, attempt to bind and join the user-data multicast group at construction, treating a bind failure as non-fatal (falling back to unicast-only delivery, never propagated as a construction error); when the bind succeeds, the system shall configure this participant's writers to send to that multicast group and shall feed every datagram received on that socket into the same dispatch path used for the unicast data socket, so a matched local reader receives a multicast-delivered sample identically to a unicast-delivered one; the same configuration flag that disables SPDP discovery multicast shall also disable user-data multicast, so a single flag covers both multicast sockets a participant ever binds.",
       "category": "functional",
       "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-063",
+      "title": "General-purpose XCDR1 primitive encode/decode",
+      "text": "The system shall provide a general-purpose CDR/XCDR1 encoder and decoder for typed, non-opaque RTPS payloads (distinct from the PL_CDR_LE parameter-list codec) supporting bool, octet (signed and unsigned), char, 16/32/64-bit signed and unsigned integers, and 32/64-bit IEEE 754 floats, little-endian, each aligned to its own size (1 byte for bool/octet/char, 2 for 16-bit, 4 for 32-bit, 8 for 64-bit) counted from the start of the encoded buffer including its 4-byte CDR_LE encapsulation header, matching go-DDS's tools/cdr package (cdr.Encoder/cdr.Decoder primitive Write*/Read* methods) byte-for-byte.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-064",
+      "title": "General-purpose XCDR1 string and byte-sequence encode",
+      "text": "The system shall encode a CDR string as a 4-byte little-endian length (character count including a null terminator, 4-byte aligned) followed by the UTF-8 bytes and a null terminator, and shall encode a byte sequence as a 4-byte little-endian element count (4-byte aligned) followed by the raw bytes with no per-element padding, matching go-DDS's tools/cdr package (cdr.Encoder.WriteString/WriteBytes) byte-for-byte; sequences of other primitive or composite types are composed by callers from a leading element-count write followed by that many per-element writes, the same convention go-DDS's cdr package itself uses (no dedicated typed-sequence method beyond WriteBytes).",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-065",
+      "title": "General-purpose XCDR1 primitive decode error handling",
+      "text": "The system's general-purpose XCDR1 decoder shall reject a buffer shorter than the 4-byte CDR encapsulation header or whose header scheme is neither CDR_LE (0x0001) nor CDR_BE (0x0000, accepted on the header without a big-endian decode path, matching go-DDS's own decoder behaviour), and every primitive read shall return an error rather than panic or index out of bounds when fewer bytes remain than the field requires at the current (alignment-adjusted) cursor position, matching go-DDS's tools/cdr package (cdr.Decoder primitive Read* methods and its need()/NewDecoder error paths) behaviourally.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-RTPS-066",
+      "title": "General-purpose XCDR1 string and byte-sequence decode error handling",
+      "text": "The system's general-purpose XCDR1 decoder shall decode a CDR string/byte-sequence by reading its 4-byte length/count prefix and then that many bytes, returning an error rather than panicking or indexing out of bounds when the declared length exceeds the remaining buffer, and shall lossily convert invalid UTF-8 in a decoded string rather than rejecting it outright so malformed or hostile input cannot abort decoding of the rest of the message, matching go-DDS's tools/cdr package (cdr.Decoder.ReadString/ReadBytes) behaviourally with that one deliberate safety deviation (go-DDS's ReadString does not validate UTF-8 at all, since Go strings may hold arbitrary bytes).",
+      "category": "functional",
+      "criticality": "medium"
     }
   ]
 }

@@ -12,10 +12,14 @@
 //! parameter lists that SPDP/SEDP (later Tier 1 sub-phases) carry inside
 //! DATA submessage payloads. **This is deliberately not** the
 //! general-purpose XCDR1/XCDR2 payload codec for typed, IDL-generated
-//! application data — that is Tier 3's `dds-tools` crate (mirrors go-DDS's
-//! top-level `cdr` package, a separate and larger thing). Only the
-//! little-endian encapsulation variant is implemented, matching go-DDS's
-//! own scope note ("the de-facto standard for modern RTPS implementations").
+//! application data (mirrors go-DDS's top-level `cdr` package, a separate
+//! and larger thing) — that codec landed as [`super::xcdr`] under the v0.2
+//! "CDR/XCDR1 serialization for RTPS wire format" milestone; a later
+//! extraction of `xcdr` into its own crate alongside IDL tooling remains
+//! possible at Tier 3 but is out of this module's scope either way. Only
+//! the little-endian encapsulation variant is implemented here, matching
+//! go-DDS's own scope note ("the de-facto standard for modern RTPS
+//! implementations").
 //!
 //! Wire layout ported 1:1 from go-DDS's `rtps/cdr.go`: the `plCDREncoder`/
 //! `plCDRDecoder` parameter-list codec and its parameter-ID (PID) table.
