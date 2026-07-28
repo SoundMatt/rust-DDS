@@ -19,7 +19,10 @@
 //! processes*, not within one process's own test suite (that in-process
 //! case is already covered by
 //! `src/rtps/participant.rs::tests::reliable_qos_detects_gap_and_retransmits_over_real_udp`
-//! — this binary is the thing that case explicitly does not prove).
+//! — this binary is the thing that case explicitly does not prove) — and
+//! (`--no-multicast`/`--peer`/`--meta-port`) the unicast half of SPDP
+//! discovery from `ROADMAP.md`'s "Planned — v0.2" checklist, the same way,
+//! between two live processes with no multicast socket on either side.
 //!
 //! Not part of the crate's public library API (this is a `[[bin]]`
 //! target, `rust_dds::rtps` remains internal/not re-exported) and not
@@ -33,10 +36,12 @@
 //! `0` on success, `1` otherwise. See [`Report`] for the exact shape.
 
 use std::io::Write as _;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
+use tokio::sync::mpsc;
 
 use rust_dds::relay::SubscriberOptions;
 use rust_dds::rtps::guid::GuidPrefix;
@@ -46,7 +51,9 @@ use rust_dds::rtps::message::{
 use rust_dds::rtps::participant::RtpsParticipant;
 use rust_dds::rtps::sedp::{SedpConfig, SedpService};
 use rust_dds::rtps::spdp::{SpdpConfig, SpdpService};
-use rust_dds::rtps::transport::{meta_multicast_port, RtpsSocket, SPDP_MULTICAST_ADDR};
+use rust_dds::rtps::transport::{
+    meta_multicast_port, RtpsDatagram, RtpsSocket, SPDP_MULTICAST_ADDR,
+};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Role {
@@ -115,6 +122,26 @@ struct Cli {
     /// doc comment.
     #[arg(long)]
     drop_seq: Option<u64>,
+    /// Binds the metatraffic unicast socket at this fixed port instead of
+    /// an OS-assigned ephemeral one (default `0`). Needed for unicast-only
+    /// discovery tests (`--no-multicast`/`--peer`): two independent
+    /// processes must each know the other's metatraffic port *before*
+    /// either one starts, which an ephemeral port cannot provide — the
+    /// same "known in advance" property `ROADMAP.md`'s v0.2 SPDP-unicast
+    /// item calls out for Docker/cloud/TSN deployments.
+    #[arg(long, default_value_t = 0)]
+    meta_port: u16,
+    /// Disables SPDP multicast entirely (no bind/join of `239.255.0.1`, no
+    /// multicast send) — see [`rust_dds::rtps::spdp::SpdpConfig::no_multicast`].
+    /// Combine with `--peer` for unicast-only discovery.
+    #[arg(long, default_value_t = false)]
+    no_multicast: bool,
+    /// Static peer unicast address (`host:port`) to send SPDP
+    /// announcements directly to, in addition to (or, with
+    /// `--no-multicast`, instead of) the multicast group. Repeatable — see
+    /// [`rust_dds::rtps::spdp::SpdpConfig::peer_locators`].
+    #[arg(long)]
+    peer: Vec<SocketAddr>,
 }
 
 #[derive(Serialize)]
@@ -147,6 +174,28 @@ fn guid_prefix(seed: u8) -> GuidPrefix {
     GuidPrefix([seed; 12])
 }
 
+/// Fans a single socket receive loop's output out to every sender in
+/// `senders`, cloning each datagram — mirrors
+/// `rust_dds::rtps::dds_participant`'s private helper of the same name
+/// (not exported, so duplicated here rather than depended on; this binary
+/// is deliberately built entirely on public/internal `rust_dds::rtps` API,
+/// same as every other piece of this file). Needed because the
+/// metatraffic unicast socket carries both SEDP traffic (always) and, once
+/// a peer's unicast SPDP announcement arrives on it, SPDP traffic too —
+/// and `mpsc::Receiver` is single-consumer.
+fn spawn_datagram_fanout(
+    mut rx: mpsc::Receiver<RtpsDatagram>,
+    senders: Vec<mpsc::Sender<RtpsDatagram>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(datagram) = rx.recv().await {
+            for tx in &senders {
+                let _ = tx.send(datagram.clone()).await;
+            }
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -158,15 +207,7 @@ async fn run(cli: Cli) -> i32 {
     let prefix = guid_prefix(cli.prefix_seed);
     let discovery_timeout = Duration::from_secs(cli.discovery_timeout_secs);
 
-    let Some(mcast_port) = meta_multicast_port(cli.domain) else {
-        return fail_report(
-            cli.role,
-            prefix,
-            format!("domain {} out of range", cli.domain),
-        );
-    };
-
-    let meta_socket = match RtpsSocket::bind_unicast_v4(0).await {
+    let meta_socket = match RtpsSocket::bind_unicast_v4(cli.meta_port).await {
         Ok(s) => std::sync::Arc::new(s),
         Err(e) => return fail_report(cli.role, prefix, format!("bind meta socket: {e}")),
     };
@@ -174,36 +215,64 @@ async fn run(cli: Cli) -> i32 {
         Ok(s) => std::sync::Arc::new(s),
         Err(e) => return fail_report(cli.role, prefix, format!("bind data socket: {e}")),
     };
-    let mcast_socket = match RtpsSocket::bind_multicast_v4(SPDP_MULTICAST_ADDR, mcast_port).await {
-        Ok(s) => std::sync::Arc::new(s),
-        Err(e) => return fail_report(cli.role, prefix, format!("bind multicast socket: {e}")),
+    // No multicast socket at all when --no-multicast — unicast-only
+    // discovery relies entirely on --peer plus the metatraffic socket's
+    // receive-loop fan-out to SPDP set up below.
+    let mcast_socket = if cli.no_multicast {
+        None
+    } else {
+        let Some(mcast_port) = meta_multicast_port(cli.domain) else {
+            return fail_report(
+                cli.role,
+                prefix,
+                format!("domain {} out of range", cli.domain),
+            );
+        };
+        match RtpsSocket::bind_multicast_v4(SPDP_MULTICAST_ADDR, mcast_port).await {
+            Ok(s) => Some(std::sync::Arc::new(s)),
+            Err(e) => return fail_report(cli.role, prefix, format!("bind multicast socket: {e}")),
+        }
     };
 
     log(format!(
-        "rtps-interop-peer: role={:?} prefix_seed={} domain={} meta_port={} data_port={} mcast_port={}",
+        "rtps-interop-peer: role={:?} prefix_seed={} domain={} meta_port={} data_port={} mcast_port={:?} \
+         no_multicast={} peers={:?}",
         cli.role,
         cli.prefix_seed,
         cli.domain,
         meta_socket.local_port(),
         data_socket.local_port(),
-        mcast_port,
+        mcast_socket.as_ref().map(|s| s.local_port()),
+        cli.no_multicast,
+        cli.peer,
     ));
 
     // Fast announce cadence — this is a test peer, not a production
     // participant, and the CI job driving this binary should not need to
     // wait out the real 2-second default just to observe discovery.
-    let spdp_cfg = SpdpConfig::new(
+    let mut spdp_cfg = SpdpConfig::new(
         cli.domain,
         prefix,
         meta_socket.local_port(),
         data_socket.local_port(),
     )
-    .with_announce_period(Duration::from_millis(200));
+    .with_announce_period(Duration::from_millis(200))
+    .with_peer_locators(cli.peer.iter().copied());
+    if cli.no_multicast {
+        spdp_cfg = spdp_cfg.with_no_multicast();
+    }
     let spdp = SpdpService::new(spdp_cfg, std::sync::Arc::clone(&meta_socket));
     let _announce_task = std::sync::Arc::clone(&spdp).spawn_announce_loop();
     let _evict_task = std::sync::Arc::clone(&spdp).spawn_evict_loop();
-    let (mcast_rx, _mcast_recv_task) = mcast_socket.spawn_receive_loop(64);
-    let _spdp_recv_task = std::sync::Arc::clone(&spdp).spawn_receive_loop(mcast_rx);
+    // These two tasks' `JoinHandle`s are intentionally allowed to drop at
+    // the end of this `if let` block: dropping a `JoinHandle` in tokio only
+    // detaches the task (it keeps running), it does not abort it — same
+    // convention as every other `let _x = ...spawn...()` binding in this
+    // function, just scoped to this block instead of all of `run`.
+    if let Some(mcast_socket) = &mcast_socket {
+        let (mcast_rx, _mcast_recv_task) = mcast_socket.spawn_receive_loop(64);
+        let _spdp_recv_task = std::sync::Arc::clone(&spdp).spawn_receive_loop(mcast_rx);
+    }
 
     let sedp_cfg = SedpConfig::new(prefix, data_socket.local_port());
     let sedp = SedpService::new(
@@ -211,8 +280,18 @@ async fn run(cli: Cli) -> i32 {
         std::sync::Arc::clone(&meta_socket),
         std::sync::Arc::clone(&spdp),
     );
+    // A peer's unicast SPDP announcement (its own --peer pointing back at
+    // this process) arrives on this process's metatraffic unicast socket —
+    // the same socket SEDP unicast traffic already uses — so fan its
+    // receive loop out to both SPDP and SEDP rather than SEDP alone,
+    // matching `RtpsUdpParticipant::new_with_config`'s wiring
+    // (`src/rtps/dds_participant.rs`).
     let (meta_rx, _meta_recv_task) = meta_socket.spawn_receive_loop(64);
-    let _sedp_recv_task = std::sync::Arc::clone(&sedp).spawn_receive_loop(meta_rx);
+    let (spdp_meta_tx, spdp_meta_rx) = mpsc::channel(64);
+    let (sedp_meta_tx, sedp_meta_rx) = mpsc::channel(64);
+    let _fanout_task = spawn_datagram_fanout(meta_rx, vec![spdp_meta_tx, sedp_meta_tx]);
+    let _spdp_meta_recv_task = std::sync::Arc::clone(&spdp).spawn_receive_loop(spdp_meta_rx);
+    let _sedp_recv_task = std::sync::Arc::clone(&sedp).spawn_receive_loop(sedp_meta_rx);
 
     let participant = RtpsParticipant::new(
         prefix,

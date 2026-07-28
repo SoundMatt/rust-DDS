@@ -1306,6 +1306,13 @@
       "text": "The system shall provide a pure encoder and decoder for the standard libpcap file format (global header plus per-record IPv4/UDP framing) sufficient to read a checked-in fixture of known-good RTPS 2.3 section-9 messages sourced from go-DDS's real encoder, and decoding each recorded message's RTPS Header and submessage stream shall reproduce the exact same field values and bytes as go-DDS's own reference output for those messages, so that wire-format regressions in this crate's RTPS decode path are caught without requiring a live peer process; decoding malformed or truncated pcap input shall never panic.",
       "category": "functional",
       "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-059",
+      "title": "SPDP static unicast peer discovery",
+      "text": "The system shall allow a participant's SPDP configuration to carry a list of static peer unicast addresses and, independently, a flag disabling the SPDP multicast send; when sending an SPDP announcement, the system shall send the same ParticipantData payload directly (unicast) to every configured peer address, in addition to the multicast group unless multicast is disabled, in which case only the configured peer addresses are sent to; the ParticipantData payload and RTPS message framing shall be unchanged from the multicast case (no new wire format), and an incoming SPDP announcement shall be processed identically regardless of whether it arrived via a multicast-joined socket or a unicast one.",
+      "category": "functional",
+      "criticality": "medium"
     }
   ]
 }

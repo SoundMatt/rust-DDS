@@ -26,6 +26,56 @@
 //! `DiscoveryPlugin` authentication hook (`PID_DISCOVERY_TOKEN`), and the
 //! `livelinessCb` participant-liveliness callback.
 //!
+//! # Unicast peer discovery (the "+ unicast" half of SPDP)
+//!
+//! `ROADMAP.md`'s "Planned — v0.2" SPDP checklist item covers both
+//! multicast (above, done since this module's initial landing) and static
+//! unicast peer discovery, for environments where multicast routing is
+//! unavailable or undesirable (Docker/cloud networks, TSN segments).
+//! [`SpdpConfig::peer_locators`]/[`SpdpConfig::with_peer_locators`] adds a
+//! list of known peer unicast addresses that [`SpdpService::send_announcement`]
+//! sends the same `ParticipantData` announcement to directly (unicast, via
+//! the same `send_socket` already used for the multicast send), in addition
+//! to the multicast group; [`SpdpConfig::no_multicast`]/
+//! [`SpdpConfig::with_no_multicast`] independently disables the multicast
+//! send (composed with a non-empty `peer_locators` for unicast-only
+//! discovery). No new wire format: the `ParticipantData` payload and RTPS
+//! framing are byte-identical to the multicast case (already verified
+//! byte-for-byte against go-DDS above) — only the *destination address* of
+//! an already-correct encode changes.
+//!
+//! Mirrors go-DDS's `WithPeerLocators`/`WithNoMulticast` `Option`s
+//! (`rtps/participant.go`) in shape — a peer-address list plus an
+//! independent multicast-disable flag — translated to this crate's own
+//! builder-style config idiom (`SpdpConfig`) rather than go-DDS's
+//! functional-options-string signature. One documented deviation, found by
+//! inspecting a fresh go-DDS clone rather than assumed: go-DDS's own
+//! `peerLocators` field is currently stored by `WithPeerLocators` but never
+//! read by `spdpService.sendAnnouncement` (no unicast send is actually
+//! wired there), and `noMulticast` only gates the *unrelated* user-data
+//! multicast socket (`dataMcastSock`, the next roadmap checklist item), not
+//! the SPDP multicast socket/send — `rtps/packet_test.go`'s own
+//! `TestWithNoMulticast_ParticipantStarts` comment says as much ("the
+//! option is stored but not yet used to skip the bind — that is wired at
+//! SPDP level"). So there is no working byte/behavioural oracle to verify
+//! this sub-feature against; this implementation follows go-DDS's own doc
+//! comments (the stated intent of `WithPeerLocators`/`WithNoMulticast`) as
+//! the design reference instead, and rust-DDS's SPDP layer ends up actually
+//! wiring the send-time behaviour go-DDS's own API surface still only
+//! promises.
+//!
+//! Receive-side: a unicast SPDP announcement is addressed to a peer's
+//! metatraffic unicast port (the same port SEDP unicast traffic already
+//! flows to — go-DDS's own `metaSock` field comment describes it as
+//! handling "SPDP send + SEDP send/receive (unicast)"), so
+//! [`super::dds_participant::RtpsUdpParticipant`] fans the meta socket's
+//! incoming datagrams out to both this service and
+//! [`super::sedp::SedpService`] — see that module's constructor docs.
+//! [`SpdpService::handle_packet`]/[`SpdpService::spawn_receive_loop`]
+//! themselves are unchanged: they already accept any
+//! `mpsc::Receiver<RtpsDatagram>`, regardless of whether the datagrams on
+//! it arrived via a multicast-joined socket or a plain unicast one.
+//!
 //! # Async model
 //!
 //! Consistent with `transport.rs` (sub-phase 3) and the crate-wide tokio
@@ -123,8 +173,12 @@ const ALL_BUILTIN_ENDPOINTS: u32 = ENDPOINT_SPDP_ANNOUNCER
 /// Fixed configuration for one participant's [`SpdpService`]: identity
 /// (`guid_prefix`, `vendor_id`), the two unicast ports it advertises for
 /// SEDP/user-data traffic, and the announce cadence.
+///
+/// Not [`Copy`] (unlike earlier sub-phases' fixed-size configs) because
+/// [`SpdpConfig::peer_locators`] is a growable list; use `.clone()` where an
+/// implicit copy previously sufficed.
 //fusa:req REQ-RTPS-025
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpdpConfig {
     /// Domain ID, used to compute the SPDP multicast port (RTPS 2.3
     /// §9.6.1).
@@ -152,6 +206,25 @@ pub struct SpdpConfig {
     /// synchronised floods when many participants start simultaneously.
     /// `Duration::ZERO` (the [`SpdpConfig::new`] default) disables jitter.
     pub jitter: Duration,
+    /// Static peer unicast addresses to send SPDP announcements directly
+    /// to, in addition to the multicast group (or instead of it, when
+    /// [`SpdpConfig::no_multicast`] is set). Empty by default — set via
+    /// [`SpdpConfig::with_peer_locators`]. Mirrors go-DDS's
+    /// `WithPeerLocators`/`peerLocators` in shape; see the module docs'
+    /// "Unicast peer discovery" section for the one behavioural deviation
+    /// (go-DDS's own field is unwired, this one is not).
+    pub peer_locators: Vec<SocketAddr>,
+    /// When `true`, [`SpdpService::send_announcement`] does not send to the
+    /// multicast group at all — only to [`SpdpConfig::peer_locators`].
+    /// `false` by default — set via [`SpdpConfig::with_no_multicast`].
+    /// Intended to be combined with a non-empty `peer_locators` for
+    /// unicast-only discovery; setting it with an empty `peer_locators`
+    /// means this participant sends no SPDP announcements at all (it can
+    /// still be *found* by a peer that lists it in that peer's own
+    /// `peer_locators`). Mirrors go-DDS's `WithNoMulticast`/`noMulticast` in
+    /// shape — see the module docs' "Unicast peer discovery" section for
+    /// the one behavioural deviation.
+    pub no_multicast: bool,
 }
 
 impl SpdpConfig {
@@ -172,6 +245,8 @@ impl SpdpConfig {
             data_unicast_port,
             announce_period: SPDP_ANNOUNCE_PERIOD,
             jitter: Duration::ZERO,
+            peer_locators: Vec::new(),
+            no_multicast: false,
         }
     }
 
@@ -184,6 +259,24 @@ impl SpdpConfig {
     /// Overrides the jitter upper bound (builder style).
     pub fn with_jitter(mut self, jitter: Duration) -> Self {
         self.jitter = jitter;
+        self
+    }
+
+    /// Adds static peer unicast addresses (builder style) — see
+    /// [`SpdpConfig::peer_locators`]. Additive across repeated calls,
+    /// matching go-DDS's `WithPeerLocators(addrs ...string)` (which
+    /// `append`s rather than replaces).
+    //fusa:req REQ-RTPS-059
+    pub fn with_peer_locators(mut self, addrs: impl IntoIterator<Item = SocketAddr>) -> Self {
+        self.peer_locators.extend(addrs);
+        self
+    }
+
+    /// Disables SPDP multicast send (builder style) — see
+    /// [`SpdpConfig::no_multicast`].
+    //fusa:req REQ-RTPS-059
+    pub fn with_no_multicast(mut self) -> Self {
+        self.no_multicast = true;
         self
     }
 }
@@ -452,9 +545,25 @@ impl SpdpService {
         self.seq_counter.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Builds and sends one SPDP announcement to the domain's multicast
-    /// group. Matches go-DDS's `sendAnnouncement`.
+    /// Builds and sends one SPDP announcement: to the domain's multicast
+    /// group (unless [`SpdpConfig::no_multicast`] is set) and directly
+    /// (unicast) to every address in [`SpdpConfig::peer_locators`]. Matches
+    /// go-DDS's `sendAnnouncement`, extended with the unicast-peer send
+    /// go-DDS's own `peerLocators` field does not yet wire up (see the
+    /// module docs' "Unicast peer discovery" section).
+    ///
+    /// Every configured destination is attempted even if an earlier one
+    /// fails (best-effort per destination, matching this method's own
+    /// pre-existing single-destination behaviour of swallowing send errors
+    /// in [`SpdpService::spawn_announce_loop`]); if `no_multicast` is unset
+    /// but the domain's multicast port formula overflows, that failure is
+    /// recorded the same way a failed unicast send is, rather than
+    /// aborting before any peer send is attempted. Returns the last error
+    /// encountered, if any; `Ok(())` if every attempted destination (there
+    /// may be zero, if `no_multicast` is set and `peer_locators` is empty)
+    /// succeeded.
     //fusa:req REQ-RTPS-027
+    //fusa:req REQ-RTPS-059
     pub async fn send_announcement(&self) -> std::io::Result<()> {
         self.announces_sent.fetch_add(1, Ordering::Relaxed);
 
@@ -475,15 +584,35 @@ impl SpdpService {
         };
         let msg = wrap_in_rtps_message(header, &submsg);
 
-        let port = meta_multicast_port(self.config.domain).ok_or_else(|| {
-            std::io::Error::other(format!(
-                "rtps: domain {} out of range for SPDP multicast port",
-                self.config.domain
-            ))
-        })?;
-        let dst = SocketAddr::from((SPDP_MULTICAST_ADDR, port));
-        self.send_socket.send_to(&msg, dst).await?;
-        Ok(())
+        let mut last_err = None;
+
+        if !self.config.no_multicast {
+            match meta_multicast_port(self.config.domain) {
+                Some(port) => {
+                    let dst = SocketAddr::from((SPDP_MULTICAST_ADDR, port));
+                    if let Err(e) = self.send_socket.send_to(&msg, dst).await {
+                        last_err = Some(e);
+                    }
+                }
+                None => {
+                    last_err = Some(std::io::Error::other(format!(
+                        "rtps: domain {} out of range for SPDP multicast port",
+                        self.config.domain
+                    )));
+                }
+            }
+        }
+
+        for &peer in &self.config.peer_locators {
+            if let Err(e) = self.send_socket.send_to(&msg, peer).await {
+                last_err = Some(e);
+            }
+        }
+
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Spawns the periodic announce loop: sends immediately (matching
@@ -748,6 +877,8 @@ mod tests {
             data_unicast_port: 17411,
             announce_period: SPDP_ANNOUNCE_PERIOD,
             jitter: Duration::ZERO,
+            peer_locators: Vec::new(),
+            no_multicast: false,
         }
     }
 
@@ -887,12 +1018,15 @@ mod tests {
     }
 
     //fusa:test REQ-RTPS-027
+    //fusa:test REQ-RTPS-059
     #[test]
     fn spdp_config_defaults_match_go_dds_reference() {
         let cfg = SpdpConfig::new(0, ascending_prefix(), 17410, 17411);
         assert_eq!(cfg.announce_period, Duration::from_secs(2));
         assert_eq!(cfg.jitter, Duration::ZERO);
         assert_eq!(cfg.vendor_id, VENDOR_ID_RUST_DDS);
+        assert!(cfg.peer_locators.is_empty());
+        assert!(!cfg.no_multicast);
     }
 
     //fusa:test REQ-RTPS-027
@@ -903,6 +1037,21 @@ mod tests {
             .with_jitter(Duration::from_millis(50));
         assert_eq!(cfg.announce_period, Duration::from_millis(500));
         assert_eq!(cfg.jitter, Duration::from_millis(50));
+    }
+
+    //fusa:test REQ-RTPS-059
+    #[test]
+    fn spdp_config_peer_locators_and_no_multicast_builder_overrides() {
+        let peer_a = SocketAddr::from((Ipv4Addr::new(127, 0, 0, 1), 7400));
+        let peer_b = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 7500));
+        let cfg = SpdpConfig::new(0, ascending_prefix(), 17410, 17411)
+            .with_peer_locators([peer_a])
+            .with_peer_locators([peer_b])
+            .with_no_multicast();
+        // Additive across repeated calls, matching go-DDS's
+        // WithPeerLocators(addrs ...string)'s append semantics.
+        assert_eq!(cfg.peer_locators, vec![peer_a, peer_b]);
+        assert!(cfg.no_multicast);
     }
 
     #[test]
@@ -982,7 +1131,7 @@ mod tests {
     async fn handle_packet_ignores_own_announcement() {
         let send_socket = bound_socket().await;
         let cfg = SpdpConfig::new(0, ascending_prefix(), 17410, 17411);
-        let service = SpdpService::new(cfg, send_socket);
+        let service = SpdpService::new(cfg.clone(), send_socket);
 
         let payload = build_participant_data(&cfg);
         let submsg = encode_data_submessage(
@@ -1118,6 +1267,112 @@ mod tests {
         assert_eq!(&datagram.data[0..4], b"RTPS");
 
         recv_handle.abort();
+    }
+
+    //fusa:test REQ-RTPS-059
+    #[tokio::test]
+    async fn send_announcement_reaches_a_peer_via_unicast_without_multicast() {
+        // The unicast half of SPDP discovery: a peer listed in
+        // peer_locators receives the announcement directly, with no
+        // multicast socket involved at all — proven here by giving the
+        // service an out-of-range domain (1000: 7400 + 250*1000 overflows
+        // u16, so meta_multicast_port(1000) is None) that would make a
+        // multicast send fail outright; send_announcement still succeeds
+        // because with_no_multicast() means that path is never attempted.
+        let peer_socket = bound_socket().await;
+        let peer_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, peer_socket.local_port()));
+        // Reuse peer_socket's own receive loop to observe what arrives.
+        let (mut peer_rx, peer_recv_handle) = peer_socket.spawn_receive_loop(8);
+
+        let send_socket = bound_socket().await;
+        let cfg = SpdpConfig::new(1000, ascending_prefix(), 17410, 17411)
+            .with_peer_locators([peer_addr])
+            .with_no_multicast();
+        let service = SpdpService::new(cfg, send_socket);
+
+        service
+            .send_announcement()
+            .await
+            .expect("unicast-only send_announcement must succeed despite the out-of-range domain, since no multicast send is attempted");
+
+        let datagram = tokio::time::timeout(Duration::from_secs(5), peer_rx.recv())
+            .await
+            .expect("unicast SPDP announcement did not reach the configured peer in time")
+            .expect("channel closed unexpectedly");
+        assert_eq!(&datagram.data[0..4], b"RTPS");
+
+        peer_recv_handle.abort();
+    }
+
+    //fusa:test REQ-RTPS-059
+    #[tokio::test]
+    async fn send_announcement_reaches_multiple_peers_via_unicast() {
+        let peer_a_socket = bound_socket().await;
+        let peer_b_socket = bound_socket().await;
+        let peer_a_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, peer_a_socket.local_port()));
+        let peer_b_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, peer_b_socket.local_port()));
+        let (mut peer_a_rx, peer_a_handle) = peer_a_socket.spawn_receive_loop(8);
+        let (mut peer_b_rx, peer_b_handle) = peer_b_socket.spawn_receive_loop(8);
+
+        let send_socket = bound_socket().await;
+        let cfg = SpdpConfig::new(1000, ascending_prefix(), 17410, 17411)
+            .with_peer_locators([peer_a_addr, peer_b_addr])
+            .with_no_multicast();
+        let service = SpdpService::new(cfg, send_socket);
+        service.send_announcement().await.unwrap();
+
+        for rx in [&mut peer_a_rx, &mut peer_b_rx] {
+            let datagram = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("unicast SPDP announcement did not reach every configured peer in time")
+                .expect("channel closed unexpectedly");
+            assert_eq!(&datagram.data[0..4], b"RTPS");
+        }
+
+        peer_a_handle.abort();
+        peer_b_handle.abort();
+    }
+
+    //fusa:test REQ-RTPS-059
+    #[tokio::test]
+    async fn peer_locator_datagram_is_processed_identically_to_a_multicast_one() {
+        // Confirms the *receiving* side needs no special-casing: a
+        // service's handle_packet stores a peer from a unicast-delivered
+        // announcement exactly the way it does for a multicast-delivered
+        // one — SpdpService itself is transport-agnostic (see the module
+        // docs' "Unicast peer discovery" section).
+        let send_socket = bound_socket().await;
+        let own_cfg = SpdpConfig::new(0, ascending_prefix(), 17410, 17411);
+        let service = SpdpService::new(own_cfg, send_socket);
+
+        let mut peer_prefix = ascending_prefix();
+        peer_prefix.0[0] = 0xFF;
+        let peer_cfg = SpdpConfig::new(0, peer_prefix, 27410, 27411);
+        let payload = build_participant_data(&peer_cfg);
+        let submsg = encode_data_submessage(
+            ENTITYID_SPDP_WRITER,
+            ENTITYID_SPDP_READER,
+            SequenceNumber { high: 0, low: 1 },
+            &payload,
+        );
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: peer_cfg.vendor_id,
+            guid_prefix: peer_prefix,
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+
+        // Deliver it as if it had arrived on a plain unicast socket (no
+        // multicast join anywhere in this test) at an arbitrary source
+        // address — handle_packet does not know or care which kind of
+        // socket a datagram arrived on.
+        service
+            .handle_packet(&msg, SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 27410)))
+            .await;
+
+        let peers = service.known_peers().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].guid.prefix, peer_prefix);
     }
 
     //fusa:test REQ-RTPS-027

@@ -667,7 +667,52 @@ harder to change.
   `relay::Node` need no change: they already work with any
   `Arc<dyn Participant>`. Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001).
 - [ ] CDR/XCDR1 serialization for RTPS wire format
-- [ ] SPDP participant discovery (multicast + unicast)
+- [x] SPDP participant discovery (multicast + unicast) — the multicast half
+  landed with sub-phase 4 (`rust-DDS#25`) and has been wired into
+  `RtpsUdpParticipant` since v0.13; this item's own remaining scope — a
+  static/configured peer-unicast-address mode, for environments where
+  multicast routing is unavailable or undesirable (Docker/cloud networks,
+  TSN segments) — is done, landed in
+  [rust-DDS#34](https://github.com/SoundMatt/rust-DDS/pull/34):
+  `SpdpConfig::peer_locators`/`SpdpConfig::with_peer_locators` (a list of
+  static peer unicast `SocketAddr`s) and `SpdpConfig::no_multicast`/
+  `SpdpConfig::with_no_multicast` (independently disables the multicast
+  send), `src/rtps/spdp.rs`. `SpdpService::send_announcement` sends the
+  same already-verified `ParticipantData` announcement directly (unicast,
+  via the existing `send_socket`) to every configured peer address, in
+  addition to (or, with `no_multicast`, instead of) the multicast group —
+  no new wire format, only the destination address of an already-correct
+  encode. Wired into the public API as
+  `RtpsUdpParticipant::new_with_config`/`RtpsUdpParticipantConfig`
+  (`src/rtps/dds_participant.rs`), which also fans the metatraffic unicast
+  socket's receive loop out to both SPDP and SEDP (a peer's unicast SPDP
+  announcement arrives on the same socket SEDP unicast traffic already
+  uses) and, when multicast is disabled, skips binding/joining the SPDP
+  multicast socket entirely. Mirrors go-DDS's `WithPeerLocators`/
+  `WithNoMulticast` `Option`s (`rtps/participant.go`) in shape, translated
+  to this crate's own builder-style config idiom rather than go-DDS's
+  functional-options-string signature — with one documented deviation
+  found by inspecting a fresh go-DDS clone rather than assumed: go-DDS's
+  own `peerLocators` field is stored by `WithPeerLocators` but never read
+  by `sendAnnouncement` (no unicast send is actually wired there), and
+  `noMulticast` only gates the unrelated user-data multicast socket, not
+  SPDP multicast (`rtps/packet_test.go`'s own
+  `TestWithNoMulticast_ParticipantStarts` comment says as much) — so this
+  sub-feature has no working byte/behavioural go-DDS oracle to verify
+  against; rust-DDS's implementation follows go-DDS's own doc comments (the
+  stated intent of those two options) as the design reference instead, and
+  ends up wiring the send-time behaviour go-DDS's own API surface still
+  only promises. Verified with unit tests in `src/rtps/spdp.rs` proving
+  unicast-sent announcements reach a peer over real loopback UDP without
+  any multicast socket involved (single- and multi-peer), plus an
+  in-process two-participant `RtpsUdpParticipant` test
+  (`src/rtps/dds_participant.rs`) and a real two-OS-process extension of
+  the existing interop harness
+  (`tests/rtps_two_process_interop.rs::unicast_only_discovery_and_besteffort_delivery_between_two_live_processes_with_no_multicast`,
+  via new `--no-multicast`/`--peer`/`--meta-port` flags on
+  `src/bin/rtps_interop_peer.rs`) — SPDP discovery, SEDP matching, and
+  BestEffort delivery all working end-to-end with no multicast socket bound
+  on either side. Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001). REQ-RTPS-059.
 - [x] SEDP endpoint announcement
 - [ ] BestEffort delivery over UDP multicast and unicast
 - [ ] IPv4 and IPv6 multicast support
