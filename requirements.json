@@ -155,6 +155,20 @@
       "criticality": "medium"
     },
     {
+      "id": "REQ-QOS-008",
+      "title": "Deadline QoS callback firing",
+      "text": "When a subscriber's QoS.deadline_ns is non-zero and a Deadline-missed callback is registered, the system shall invoke that callback whenever deadline_ns nanoseconds elapse on that reader without a new sample being delivered, and shall continue to invoke it once per elapsed interval for as long as no sample arrives.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-QOS-009",
+      "title": "Deadline QoS timer reset",
+      "text": "Each sample delivered to a subscriber with Deadline QoS enabled shall restart that reader's deadline window, so the Deadline-missed callback does not fire while samples keep arriving within the configured interval.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
       "id": "REQ-ERR-001",
       "title": "Mandatory sentinels",
       "text": "The system shall expose Closed, NotConnected, Timeout, and PayloadTooLarge error variants per RELAY spec \u00a75.1.",

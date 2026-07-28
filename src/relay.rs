@@ -8,6 +8,7 @@
 //! These types mirror the RELAY spec v1.11 definitions for Rust (§18.3).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -141,6 +142,47 @@ pub enum BackPressurePolicy {
 }
 
 // ---------------------------------------------------------------------------
+// Deadline QoS callback
+// ---------------------------------------------------------------------------
+
+/// Callback invoked when Deadline QoS enforcement detects a missed deadline.
+///
+/// Fires when a reader's `QoS::deadline_ns` interval elapses with no new
+/// sample delivered on that reader; disabled (never fires) when
+/// `QoS::deadline_ns == 0` or when no callback is registered via
+/// [`with_deadline_callback`] / [`SubscriberOptions::deadline_missed`]. The
+/// callback re-arms after firing and fires again for each subsequent
+/// interval that elapses without a sample, matching go-DDS's
+/// `SubscriberConfig.DeadlineMissedCallback` (`WithDeadlineMissed`) —
+/// the behavioral reference this API shape follows for ecosystem
+/// consistency.
+///
+/// A newtype around `Arc<dyn Fn() + Send + Sync>` rather than a bare trait
+/// object: `Arc` makes it cheaply `Clone`, and the manual [`std::fmt::Debug`]
+/// impl below lets it live inside `SubscriberOptions`, which derives `Debug`
+/// (raw `dyn Fn` does not implement `Debug`).
+#[derive(Clone)]
+pub struct DeadlineCallback(pub(crate) Arc<dyn Fn() + Send + Sync>);
+
+impl DeadlineCallback {
+    /// Wrap `f` as a Deadline-missed callback.
+    pub fn new(f: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// Invoke the callback.
+    pub(crate) fn fire(&self) {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for DeadlineCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeadlineCallback(..)")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SubscriberOptions
 // ---------------------------------------------------------------------------
 
@@ -155,6 +197,14 @@ pub struct SubscriberOptions {
     ///
     /// Set via [`with_topic`] when subscribing through a `relay::Node` adapter.
     pub topic: Option<String>,
+    /// Deadline QoS callback (`QoS::deadline_ns`, §15.2).
+    ///
+    /// Set via [`with_deadline_callback`]. `None` disables Deadline
+    /// enforcement for this reader regardless of `QoS::deadline_ns`, so a
+    /// non-zero deadline with no registered callback is a documented no-op
+    /// (matches go-DDS: `cfg.DeadlineMissedCallback == nil` skips arming the
+    /// timer entirely) rather than a silent panic or error.
+    pub deadline_missed: Option<DeadlineCallback>,
 }
 
 impl SubscriberOptions {
@@ -172,6 +222,17 @@ impl SubscriberOptions {
 pub fn with_topic(topic: impl Into<String>) -> SubscriberOptions {
     SubscriberOptions {
         topic: Some(topic.into()),
+        ..Default::default()
+    }
+}
+
+/// Construct `SubscriberOptions` with a Deadline QoS callback registered.
+///
+/// Has effect only when combined with a non-zero `QoS::deadline_ns` on the
+/// same `new_subscriber` call — see [`DeadlineCallback`].
+pub fn with_deadline_callback(f: impl Fn() + Send + Sync + 'static) -> SubscriberOptions {
+    SubscriberOptions {
+        deadline_missed: Some(DeadlineCallback::new(f)),
         ..Default::default()
     }
 }

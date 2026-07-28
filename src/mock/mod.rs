@@ -166,6 +166,11 @@ impl Publisher for MockPublisher {
 struct MockSubscriber {
     inner: Arc<SubInner>,
     broker_inner: Arc<SubInner>,
+    /// Deadline QoS watcher task (§15.2), `Some` only when `QoS::deadline_ns`
+    /// was non-zero and a callback was registered via
+    /// `SubscriberOptions::deadline_missed` at subscribe time. Aborted on
+    /// `close()` for prompt shutdown — see `participant::spawn_deadline_watcher`.
+    deadline_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[async_trait]
@@ -177,6 +182,9 @@ impl Subscriber for MockSubscriber {
     async fn close(&self) -> Result<(), Error> {
         self.inner.close();
         self.broker_inner.close();
+        if let Some(task) = self.deadline_task.lock().unwrap().take() {
+            task.abort();
+        }
         Ok(())
     }
 }
@@ -299,12 +307,20 @@ impl Participant for MockParticipant {
             return Err(Error::TopicEmpty);
         }
         let inner = self.broker.subscribe(topic, &qos, &opts);
+        // Deadline QoS (§15.2): only armed when both the QoS interval and a
+        // callback are present — a non-zero deadline_ns with no registered
+        // callback is a documented no-op, matching go-DDS.
+        let deadline_task = opts
+            .deadline_missed
+            .clone()
+            .and_then(|cb| crate::participant::spawn_deadline_watcher(&inner, qos.deadline_ns, cb));
         let receiver = SampleReceiver {
             inner: inner.clone(),
         };
         let sub = MockSubscriber {
             inner: inner.clone(),
             broker_inner: inner,
+            deadline_task: Mutex::new(deadline_task),
         };
         Ok((receiver, Box::new(sub)))
     }
@@ -370,6 +386,7 @@ impl Publisher for RecordingPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     //fusa:test REQ-PUB-002
@@ -449,6 +466,124 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(sample.payload, b"cached-value");
+    }
+
+    //fusa:test REQ-QOS-008
+    #[tokio::test]
+    async fn deadline_fires_when_no_sample_arrives() {
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let qos = QoS {
+            deadline_ns: 20_000_000, // 20ms
+            ..Default::default()
+        };
+        let opts = crate::relay::with_deadline_callback(move || {
+            fired_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let (_rx, _sub) = p
+            .new_subscriber("t/deadline-miss", qos, opts)
+            .await
+            .unwrap();
+
+        // No sample is ever published on this topic — the 20ms deadline
+        // should elapse and fire the callback at least once (and, since the
+        // callback re-arms, likely more than once over this window).
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        assert!(
+            fired.load(Ordering::SeqCst) >= 1,
+            "expected the Deadline-missed callback to fire at least once"
+        );
+    }
+
+    //fusa:test REQ-QOS-009
+    #[tokio::test]
+    async fn deadline_does_not_fire_while_samples_keep_arriving() {
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let qos = QoS {
+            deadline_ns: 40_000_000, // 40ms — comfortably longer than the 10ms publish period below.
+            ..Default::default()
+        };
+        let opts = crate::relay::with_deadline_callback(move || {
+            fired_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let (rx, _sub) = p
+            .new_subscriber("t/deadline-ok", qos.clone(), opts)
+            .await
+            .unwrap();
+        let pub_ = p.new_publisher("t/deadline-ok", qos).await.unwrap();
+
+        // Publish well within the deadline window, repeatedly, for longer
+        // than the deadline period itself — if the timer were not resetting
+        // on each delivery, this would fire the callback.
+        for _ in 0..8 {
+            pub_.write(b"tick".to_vec()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Drain so the queue does not matter to this assertion.
+            let _ = rx.try_recv();
+        }
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "Deadline-missed callback must not fire while samples keep arriving within the window"
+        );
+    }
+
+    //fusa:test REQ-QOS-008
+    //fusa:test REQ-QOS-009
+    #[tokio::test]
+    async fn deadline_disabled_by_default_never_fires() {
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        // QoS::default() has deadline_ns == 0 — Deadline QoS is disabled
+        // regardless of a registered callback.
+        let opts = crate::relay::with_deadline_callback(move || {
+            fired_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let (_rx, _sub) = p
+            .new_subscriber("t/deadline-disabled", QoS::default(), opts)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+    }
+
+    //fusa:test REQ-QOS-008
+    #[tokio::test]
+    async fn deadline_stops_firing_after_subscriber_close() {
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let qos = QoS {
+            deadline_ns: 15_000_000, // 15ms
+            ..Default::default()
+        };
+        let opts = crate::relay::with_deadline_callback(move || {
+            fired_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let (_rx, sub) = p
+            .new_subscriber("t/deadline-close", qos, opts)
+            .await
+            .unwrap();
+        sub.close().await.unwrap();
+        let count_at_close = fired.load(Ordering::SeqCst);
+
+        // Give the watcher task several more deadline periods' worth of time
+        // to (incorrectly) fire again if close() had not stopped it.
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            count_at_close,
+            "Deadline-missed callback must not fire after Subscriber::close()"
+        );
     }
 
     //fusa:test REQ-PART-001

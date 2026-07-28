@@ -845,7 +845,12 @@ harder to change.
 - [x] Reliable delivery with HEARTBEAT / ACKNACK retransmission
 - [x] TransientLocal durability over RTPS (SEDP history cache)
 - [x] Fragment support for large payloads (DATA_FRAG)
-- [ ] Deadline QoS subscriber enforcement with callback
+- [x] Deadline QoS subscriber enforcement with callback (`SubscriberOptions::deadline_missed` /
+  `relay::with_deadline_callback`; a per-reader `tokio` watcher task, independently
+  stoppable, following the SPDP-announce-loop/reliable-writer-HEARTBEAT-loop idiom;
+  uniform across `mock::MockParticipant` and `RtpsUdpParticipant`, both
+  BestEffort/Reliable and Volatile/TransientLocal — API shape follows go-DDS's own
+  `SubscriberConfig.DeadlineMissedCallback`/`WithDeadlineMissed` reference behavior)
 
 ### Planned — v0.4 — Shared-Memory Transport
 
