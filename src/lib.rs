@@ -71,6 +71,16 @@
 pub mod adapt;
 pub mod error;
 pub mod mock;
+
+/// Observability — health/metrics reporting (`ROADMAP.md`'s "Planned —
+/// v0.6 — Observability (Tier 5)" milestone). `pub` for the same reason
+/// `security`/`rtps`/`shmem` are: a real, reusable API surface, not dead
+/// code — but deliberately not re-exported from the crate root's `pub use`
+/// list either, reached via `rust_dds::observability::HealthProvider` the
+/// same way `rust_dds::security::SecurityPlugin` is. See the
+/// `observability` module's own docs.
+pub mod observability;
+
 pub mod participant;
 pub mod relay;
 

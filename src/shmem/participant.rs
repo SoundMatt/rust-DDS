@@ -323,6 +323,22 @@ impl Participant for ShmemParticipant {
     }
 }
 
+/// `ShmemParticipant`'s [`HealthProvider`](crate::observability::HealthProvider)
+/// implementation: [`HealthStatus::Down`](crate::observability::HealthStatus::Down)
+/// once closed, [`HealthStatus::Ok`](crate::observability::HealthStatus::Ok)
+/// otherwise. Direct port of go-DDS's `shmem.participant.Health`
+/// (`shmem/shmem.go`), including its `{"state":"closed"}` details string,
+/// byte-for-byte.
+//fusa:req REQ-MON-003
+impl crate::observability::HealthProvider for ShmemParticipant {
+    fn health(&self) -> crate::observability::Health {
+        if self.closed.load(Ordering::SeqCst) {
+            return crate::observability::Health::down(r#"{"state":"closed"}"#);
+        }
+        crate::observability::Health::ok()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -455,6 +471,25 @@ mod tests {
             p.new_publisher("t", QoS::default()).await,
             Err(Error::Closed)
         ));
+    }
+
+    /// `ShmemParticipant::health` reports `Ok` before `close()` and `Down`
+    /// with `{"state":"closed"}` details after — matching go-DDS's
+    /// `shmem.participant.Health` byte-for-byte.
+    //fusa:test REQ-MON-003
+    #[tokio::test]
+    async fn shmem_participant_health_reflects_closed_state() {
+        use crate::observability::{HealthProvider, HealthStatus};
+
+        let p = fast(Domain(113));
+        let h = p.health();
+        assert_eq!(h.status, HealthStatus::Ok);
+        assert_eq!(h.details, None);
+
+        p.close().await.unwrap();
+        let h = p.health();
+        assert_eq!(h.status, HealthStatus::Down);
+        assert_eq!(h.details.as_deref(), Some(r#"{"state":"closed"}"#));
     }
 
     //fusa:test REQ-SHMEM-005

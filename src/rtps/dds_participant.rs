@@ -656,6 +656,31 @@ impl Participant for RtpsUdpParticipant {
     }
 }
 
+/// `RtpsUdpParticipant`'s
+/// [`HealthProvider`](crate::observability::HealthProvider) implementation:
+/// [`HealthStatus::Down`](crate::observability::HealthStatus::Down) once
+/// closed, [`HealthStatus::Ok`](crate::observability::HealthStatus::Ok)
+/// otherwise. Direct port of go-DDS's `rtps.participant.Health`
+/// (`rtps/participant.go`)'s closed-state shape, including its
+/// `{"state":"closed"}` details string, byte-for-byte; go-DDS's `Health`
+/// additionally reports live writer/reader counts in the non-closed case
+/// (`{"writers":N,"readers":N}`) by locking its own `sync.Mutex`-guarded
+/// maps synchronously — this port's equivalent state
+/// (`super::participant::RtpsParticipant`'s `writers`/`readers`) is behind
+/// `tokio::sync::RwLock`, so surfacing that same live count from this
+/// synchronous, non-async trait method is left for a later item (e.g.
+/// alongside this milestone's next checklist item, `MetricsProvider`)
+/// rather than adding blocking lock acquisition here.
+//fusa:req REQ-MON-003
+impl crate::observability::HealthProvider for RtpsUdpParticipant {
+    fn health(&self) -> crate::observability::Health {
+        if self.closed.load(Ordering::SeqCst) {
+            return crate::observability::Health::down(r#"{"state":"closed"}"#);
+        }
+        crate::observability::Health::ok()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RtpsPublisher
 // ---------------------------------------------------------------------------
@@ -920,6 +945,28 @@ mod tests {
                 .await,
             Err(Error::Closed)
         ));
+    }
+
+    /// `RtpsUdpParticipant::health` reports `Ok` before `close()` and
+    /// `Down` with `{"state":"closed"}` details after — matching go-DDS's
+    /// `rtps.participant.Health` closed-state shape byte-for-byte.
+    //fusa:test REQ-MON-003
+    #[tokio::test]
+    async fn rtps_participant_health_reflects_closed_state() {
+        use crate::observability::{HealthProvider, HealthStatus};
+
+        let Ok(p) = RtpsUdpParticipant::new(TEST_DOMAIN).await else {
+            return;
+        };
+
+        let h = p.health();
+        assert_eq!(h.status, HealthStatus::Ok);
+        assert_eq!(h.details, None);
+
+        p.close().await.unwrap();
+        let h = p.health();
+        assert_eq!(h.status, HealthStatus::Down);
+        assert_eq!(h.details.as_deref(), Some(r#"{"state":"closed"}"#));
     }
 
     //fusa:test REQ-PART-003
