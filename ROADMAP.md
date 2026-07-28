@@ -509,7 +509,7 @@ sub-phase work above, exactly as scoped:
   sweep as well as the `rtps-interop` job). REQ-RTPS-058.
 
 - **A third, independent oracle beyond go-DDS self-interop** — landed in
-  [rust-DDS#PENDING](https://github.com/SoundMatt/rust-DDS/pull/PENDING),
+  [rust-DDS#33](https://github.com/SoundMatt/rust-DDS/pull/33),
   mirroring go-DDS's own `interop/` package (a live CycloneDDS peer, gated
   behind a build flag, driven by a `docker-compose.yml`) as closely as Rust
   idiom allows. `tests/cyclone_interop.rs` reuses `rtps-interop-peer`
