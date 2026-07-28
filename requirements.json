@@ -1481,6 +1481,20 @@
       "text": "The system shall provide a NullPlugin implementation of SecurityPlugin whose seal and open methods return the input unchanged and never fail, for use when no payload security is required (development, testing, or interop with a non-secured peer), matching go-DDS's NullPlugin behaviourally.",
       "category": "cybersecurity",
       "criticality": "medium"
+    },
+    {
+      "id": "REQ-SEC-020",
+      "title": "HmacPlugin tag append",
+      "text": "The system shall provide an HmacPlugin implementation of SecurityPlugin whose seal() appends a 32-byte HMAC-SHA-256 tag (computed under the plugin's key over the plaintext) to the end of the plaintext, and whose open() verifies that tag and returns the plaintext with the tag stripped, matching go-DDS's HMACPlugin (security/security.go) wire format and behaviour byte-for-byte.",
+      "category": "cybersecurity",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-SEC-021",
+      "title": "HmacPlugin verification failure handling",
+      "text": "HmacPlugin::open shall return SecurityError::PayloadTooShort if the input is shorter than the 32-byte HMAC tag, and SecurityError::VerificationFailed if the tag does not verify (including tampered plaintext, tampered tag, truncated ciphertext, or a mismatched key) using a constant-time tag comparison; open shall never panic and shall never return plaintext bytes when verification fails.",
+      "category": "cybersecurity",
+      "criticality": "critical"
     }
   ]
 }
