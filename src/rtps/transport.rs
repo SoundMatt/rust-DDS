@@ -109,10 +109,27 @@ pub fn data_unicast_port(domain: u32, participant_idx: u32) -> Option<u16> {
     u16::try_from(PORT_BASE + DOMAIN_GAIN * domain + 11 + PARTICIPANT_GAIN * participant_idx).ok()
 }
 
+/// The RTPS 2.3 §9.6.1 user-data multicast port for `domain`:
+/// `userMulticast(domain) = 7400 + 250*domain + 1`. Unlike
+/// [`data_unicast_port`], there is no per-participant term — one multicast
+/// group/port pair is shared by every participant on the domain, matching
+/// go-DDS's `rtps.userMulticastPort`.
+//fusa:req REQ-RTPS-060
+pub fn user_multicast_port(domain: u32) -> Option<u16> {
+    u16::try_from(PORT_BASE + DOMAIN_GAIN * domain + 1).ok()
+}
+
 /// The standard RTPS/SPDP IPv4 discovery multicast group, `239.255.0.1`.
 /// Matches go-DDS's `rtps.spdpMulticastAddr`.
 //fusa:req REQ-RTPS-017
 pub const SPDP_MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 0, 1);
+
+/// The go-DDS user-data multicast group, `239.255.0.2` (domain-scoped via
+/// [`user_multicast_port`]). One multicast packet from a BestEffort writer
+/// reaches every matched reader in the same domain without a separate
+/// unicast send per reader. Matches go-DDS's `rtps.userDataMulticastAddr`.
+//fusa:req REQ-RTPS-060
+pub const USER_DATA_MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 0, 2);
 
 /// The RTPS/SPDP IPv6 discovery multicast group (site-local scope),
 /// `FF03::1`. Matches go-DDS's `rtps.spdpMulticastAddrV6`. See the module
@@ -441,6 +458,49 @@ mod tests {
     fn spdp_multicast_addr_matches_go_dds_reference() {
         assert_eq!(SPDP_MULTICAST_ADDR, Ipv4Addr::new(239, 255, 0, 1));
         assert_eq!(SPDP_MULTICAST_ADDR.to_string(), "239.255.0.1");
+    }
+
+    // Reference values for user_multicast_port/USER_DATA_MULTICAST_ADDR,
+    // cross-checked directly against go-DDS's real
+    // `userMulticastPort`/`userDataMulticastAddr` (`rtps/locator.go`) —
+    // exact integer arithmetic / a fixed constant, so no wire-byte oracle
+    // run is needed (same rationale as the meta/data port tests above).
+    // Reproduction (package-local scratch test file, never committed):
+    //
+    //   func TestZZReproUserMulticastPortFormula(t *testing.T) {
+    //       fmt.Println(userMulticastPort(0), userMulticastPort(7), userMulticastPort(232))
+    //       fmt.Println(userDataMulticastAddr.String())
+    //   }
+    //   // -> 7401 9151 65401
+    //   // -> 239.255.0.2
+    //
+    // Full run: `go test ./rtps/... -run TestZZReproUserMulticastPortFormula -v`
+    // (go-DDS commit 8c946db / rust-DDS branch feat/rtps-besteffort-multicast).
+
+    //fusa:test REQ-RTPS-060
+    #[test]
+    fn user_multicast_port_matches_go_dds_reference() {
+        assert_eq!(user_multicast_port(0), Some(7401));
+        assert_eq!(user_multicast_port(7), Some(9151));
+        assert_eq!(user_multicast_port(232), Some(65401));
+    }
+
+    //fusa:test REQ-RTPS-060
+    #[test]
+    fn user_multicast_port_is_one_more_than_meta_multicast_port() {
+        for domain in [0u32, 1, 7, 232] {
+            assert_eq!(
+                user_multicast_port(domain),
+                meta_multicast_port(domain).map(|p| p + 1)
+            );
+        }
+    }
+
+    //fusa:test REQ-RTPS-060
+    #[test]
+    fn user_data_multicast_addr_matches_go_dds_reference() {
+        assert_eq!(USER_DATA_MULTICAST_ADDR, Ipv4Addr::new(239, 255, 0, 2));
+        assert_eq!(USER_DATA_MULTICAST_ADDR.to_string(), "239.255.0.2");
     }
 
     //fusa:test REQ-RTPS-017

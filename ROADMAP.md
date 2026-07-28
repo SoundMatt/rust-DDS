@@ -714,7 +714,50 @@ harder to change.
   BestEffort delivery all working end-to-end with no multicast socket bound
   on either side. Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001). REQ-RTPS-059.
 - [x] SEDP endpoint announcement
-- [ ] BestEffort delivery over UDP multicast and unicast
+- [x] BestEffort delivery over UDP multicast and unicast — a second remote
+  delivery path alongside the existing per-locator unicast one, landed in
+  [rust-DDS#35](https://github.com/SoundMatt/rust-DDS/pull/35):
+  `transport::USER_DATA_MULTICAST_ADDR` (`239.255.0.2`) and
+  `transport::user_multicast_port` (the RTPS 2.3 §9.6.1 domain-scoped
+  formula, `portBase + domainGain*domain + 1` — one port shared by every
+  participant on the domain, no per-participant term, unlike the meta/data
+  unicast ports), matching go-DDS's `rtps.userDataMulticastAddr`/
+  `userMulticastPort` byte-for-byte/value-for-value. Unlike SEDP's
+  per-topic unicast locator (`PID_DEFAULT_UNICAST_LOCATOR`), no new SEDP
+  wire field was needed: go-DDS's own reference implementation
+  (`rtps/participant.go`) does not advertise a per-topic multicast locator
+  either — a single well-known, domain-scoped group is used whenever any
+  reader is matched, resolved from `SedpService::matched_reader_locators`'s
+  existing non-empty check alone. `RtpsParticipant::set_user_data_multicast_addr`
+  (a post-construction setter, mirroring `SedpService::set_match_listener`'s
+  established idiom, since the caller only knows the address once it has
+  attempted — and possibly failed — to bind the multicast receive socket)
+  configures the destination; `RtpsWriter::write` then sends each wire
+  message once to that destination instead of once per matched reader's
+  unicast locator, whenever at least one remote reader is matched — for
+  both BestEffort and Reliable writers, since go-DDS's own condition
+  (`len(locs) > 0 && w.p.dataMcastSock != nil`) does not distinguish them
+  either. `RtpsUdpParticipant::new`/`new_with_config` bind and join the
+  multicast group at construction — soft-fail (never a construction error)
+  matching go-DDS's own `dataMcastSock` bind convention ("failure is soft:
+  fall back to unicast-only delivery") — and feed its receive loop into the
+  same `RtpsParticipant::spawn_receive_loop` dispatch path the unicast data
+  socket already uses, so a matched reader receives a multicast-delivered
+  sample identically to a unicast-delivered one, no new decode/dispatch
+  logic required. `RtpsUdpParticipantConfig::with_no_multicast` now gates
+  *both* multicast sockets (SPDP and user-data) with the one flag — a
+  deliberate, documented improvement on go-DDS's own `WithNoMulticast`,
+  whose doc comment claims to disable "SPDP multicast discovery" but, per a
+  fresh go-DDS clone's actual `participant.go`, only ever gates the
+  unrelated user-data multicast socket (the same go-DDS inconsistency this
+  same milestone's "SPDP participant discovery" entry above already found
+  and documented). Verified against real go-DDS reference values for the
+  multicast address/port formula (`REQ-RTPS-060`), a real two-participant
+  round trip over loopback UDP proving delivery arrives via the multicast
+  socket specifically — not the per-reader unicast fallback —
+  (`REQ-RTPS-061`), and a `RtpsUdpParticipant`-level two-process-equivalent
+  pub/sub round trip with multicast left on by default (`REQ-RTPS-062`).
+  Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001).
 - [ ] IPv4 and IPv6 multicast support
 
 ### Planned — v0.3 — Reliable QoS (Tier 1)

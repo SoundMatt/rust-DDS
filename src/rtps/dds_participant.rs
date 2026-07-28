@@ -20,7 +20,9 @@
 //! multicast socket at the RTPS 2.3 §9.6.1 formula ports, start SPDP
 //! announce/evict/receive, start SEDP receive, bridge SPDP→SEDP and
 //! SEDP→[`RtpsParticipant`] match notifications, start the data-socket
-//! receive/dispatch loop) behind [`RtpsUdpParticipant::new`], and implements
+//! receive/dispatch loop) behind [`RtpsUdpParticipant::new`], additionally
+//! binding an optional user-data multicast socket the peer binary does not
+//! (see [`RtpsUdpParticipantConfig::with_no_multicast`]'s docs), and implements
 //! [`Participant`]/[`Publisher`]/[`Subscriber`] on top of it — so
 //! application code that already programs against those traits (as it does
 //! for [`crate::mock::MockParticipant`] today) can swap in a real,
@@ -119,8 +121,8 @@ use super::participant::{RtpsParticipant, RtpsReader, RtpsWriter};
 use super::sedp::{SedpConfig, SedpService};
 use super::spdp::{SpdpConfig, SpdpService};
 use super::transport::{
-    data_unicast_port, meta_multicast_port, meta_unicast_port, RtpsDatagram, RtpsSocket,
-    SPDP_MULTICAST_ADDR,
+    data_unicast_port, meta_multicast_port, meta_unicast_port, user_multicast_port, RtpsDatagram,
+    RtpsSocket, SPDP_MULTICAST_ADDR, USER_DATA_MULTICAST_ADDR,
 };
 
 // ---------------------------------------------------------------------------
@@ -163,11 +165,25 @@ impl RtpsUdpParticipantConfig {
     /// Disables SPDP multicast entirely (builder style): no multicast
     /// socket is bound/joined, and no SPDP announcement is sent to the
     /// multicast group — only to
-    /// [`RtpsUdpParticipantConfig::with_peer_locators`]'s addresses.
+    /// [`RtpsUdpParticipantConfig::with_peer_locators`]'s addresses. Also
+    /// disables the user-data multicast group ([`super::transport::USER_DATA_MULTICAST_ADDR`]):
+    /// no multicast receive socket is bound and every
+    /// [`super::participant::RtpsWriter::write`] falls back to per-locator
+    /// unicast, matching this crate's own — deliberately more consistent —
+    /// design rather than go-DDS's `WithNoMulticast`, whose own doc comment
+    /// claims to disable "SPDP multicast discovery" but, per a fresh
+    /// go-DDS clone's actual `participant.go`, only ever gates the
+    /// unrelated user-data multicast socket (`if !p.noMulticast { ... }`
+    /// guards only `dataMcastSock`, never `mcastSock`) — see this same
+    /// item's `ROADMAP.md` entry for the "SPDP participant discovery"
+    /// milestone, which found and documented that same go-DDS
+    /// inconsistency. One flag, one meaning, covering both multicast
+    /// sockets this participant ever binds.
     /// Intended to be combined with a non-empty peer-locator list for
     /// unicast-only discovery (Docker/cloud networks and TSN segments where
     /// multicast routing is unavailable or undesirable).
     //fusa:req REQ-RTPS-059
+    //fusa:req REQ-RTPS-062
     pub fn with_no_multicast(mut self) -> Self {
         self.no_multicast = true;
         self
@@ -233,6 +249,13 @@ pub struct RtpsUdpParticipant {
     /// [`RtpsUdpParticipantConfig::with_no_multicast`] — no SPDP multicast
     /// socket is bound/joined in that case at all (unicast-only discovery).
     _mcast_socket: Option<Arc<RtpsSocket>>,
+    /// `None` when either `config.no_multicast` was set or binding/joining
+    /// the user-data multicast group failed at startup (a soft failure —
+    /// matching go-DDS's own `dataMcastSock` bind, "failure is soft: fall
+    /// back to unicast-only delivery") — every
+    /// [`super::participant::RtpsWriter::write`] then uses only the
+    /// pre-existing per-locator unicast send path.
+    _user_data_mcast_socket: Option<Arc<RtpsSocket>>,
     /// Every still-registered subscriber's queue, so `close()` can close
     /// them all — mirrors `mock::Broker`'s per-topic subscriber list, but
     /// flat (this participant does not need per-topic grouping for this
@@ -254,13 +277,20 @@ impl RtpsUdpParticipant {
     /// [`RtpsParticipant`] discovery bridges, the data-socket receive/
     /// dispatch loop) — the same sequence
     /// `src/bin/rtps_interop_peer.rs::run` already performs as a standalone
-    /// test/dev binary, now behind a library constructor.
+    /// test/dev binary, now behind a library constructor. Also attempts to
+    /// bind the user-data multicast socket (soft-fail — see
+    /// [`RtpsUdpParticipantConfig::with_no_multicast`]'s docs), so writers
+    /// created on this participant send one multicast packet per write to
+    /// every matched reader instead of one unicast packet per reader.
     ///
     /// Returns `Error::DomainOutOfRange` for `domain` outside `[0, 232]`
     /// (checked before any socket is touched) and `Error::Other` wrapping
-    /// the underlying `io::Error` if any socket fails to bind (e.g. no
-    /// multicast-capable interface, or every candidate port in the retry
-    /// range is already in use).
+    /// the underlying `io::Error` if the metatraffic/data unicast socket or
+    /// the *SPDP* multicast socket fails to bind (e.g. no multicast-capable
+    /// interface, or every candidate port in the retry range is already in
+    /// use) — the user-data multicast socket's own bind failure is soft and
+    /// never surfaces as an error here (see
+    /// [`RtpsUdpParticipantConfig::with_no_multicast`]'s docs).
     //fusa:req REQ-RTPS-041
     //fusa:req REQ-PART-001
     pub async fn new(domain: Domain) -> Result<Arc<Self>, Error> {
@@ -392,6 +422,40 @@ impl RtpsUdpParticipant {
         tasks.push(data_recv_task);
         tasks.push(Arc::clone(&inner).spawn_receive_loop(data_rx));
 
+        // Optional user-data multicast socket ("BestEffort delivery over
+        // UDP multicast and unicast", ROADMAP.md's v0.2 milestone): a
+        // single multicast send from RtpsWriter::write reaches every
+        // matched reader in the domain instead of one unicast send per
+        // reader. Gated by the same config.no_multicast flag SPDP's
+        // multicast socket uses (see with_no_multicast's docs for why one
+        // flag covers both). Unlike SPDP multicast, a bind/join failure
+        // here is soft — matching go-DDS's own dataMcastSock convention —
+        // since user-data delivery already has a fully-working unicast
+        // fallback and does not need multicast to function at all.
+        //fusa:req REQ-RTPS-062
+        let user_data_mcast_socket = if config.no_multicast {
+            None
+        } else {
+            match user_multicast_port(d) {
+                Some(port) => RtpsSocket::bind_multicast_v4(USER_DATA_MULTICAST_ADDR, port)
+                    .await
+                    .ok()
+                    .map(Arc::new),
+                None => None,
+            }
+        };
+        if let Some(mcast_socket) = &user_data_mcast_socket {
+            inner
+                .set_user_data_multicast_addr(SocketAddr::from((
+                    USER_DATA_MULTICAST_ADDR,
+                    mcast_socket.local_port(),
+                )))
+                .await;
+            let (mcast_data_rx, mcast_data_recv_task) = mcast_socket.spawn_receive_loop(64);
+            tasks.push(mcast_data_recv_task);
+            tasks.push(Arc::clone(&inner).spawn_receive_loop(mcast_data_rx));
+        }
+
         Ok(Arc::new(RtpsUdpParticipant {
             domain,
             guid_prefix,
@@ -399,6 +463,7 @@ impl RtpsUdpParticipant {
             _meta_socket: meta_socket,
             _data_socket: data_socket,
             _mcast_socket: mcast_socket,
+            _user_data_mcast_socket: user_data_mcast_socket,
             subscribers: Mutex::new(Vec::new()),
             tasks: Mutex::new(tasks),
             closed: AtomicBool::new(false),
@@ -877,5 +942,80 @@ mod tests {
         .expect("unicast-only discovery and delivery did not complete in time");
         assert_eq!(sample.payload, b"unicast-hello");
         assert_eq!(sample.topic, "UnicastOnlyTopic");
+    }
+
+    // A third dedicated domain, shared by both participants below (unlike
+    // UNICAST_ONLY_DOMAIN_A/B, which are deliberately distinct — SPDP
+    // multicast discovery, and this test's user-data multicast delivery,
+    // both require peers to be on the *same* domain).
+    const MULTICAST_DOMAIN: Domain = Domain(220);
+
+    //fusa:test REQ-RTPS-061
+    //fusa:test REQ-RTPS-062
+    #[tokio::test]
+    async fn besteffort_pubsub_between_two_participants_with_multicast_enabled() {
+        // Two independent RtpsUdpParticipant instances (default config —
+        // multicast enabled, matching RtpsUdpParticipant::new), same
+        // domain: SPDP/SEDP discover each other over the same multicast
+        // groups this test's writer then delivers samples over. Unlike
+        // `local_besteffort_pubsub_round_trips_through_the_public_traits`
+        // (one participant, in-process dispatch only) this exercises the
+        // real network send/receive path end-to-end, same posture as
+        // `unicast_only_discovery_and_delivery_between_two_participants_with_no_multicast`
+        // above but with multicast left on.
+        let Ok(a) = RtpsUdpParticipant::new(MULTICAST_DOMAIN).await else {
+            return; // no multicast-capable interface in this environment
+        };
+        let Ok(b) = RtpsUdpParticipant::new(MULTICAST_DOMAIN).await else {
+            return;
+        };
+        let a: Arc<dyn Participant> = a;
+        let b: Arc<dyn Participant> = b;
+
+        let (rx, _sub) = b
+            .new_subscriber(
+                "MulticastTopic",
+                DEFAULT_QOS.clone(),
+                SubscriberOptions::default(),
+            )
+            .await
+            .unwrap();
+        let pub_ = a
+            .new_publisher("MulticastTopic", DEFAULT_QOS.clone())
+            .await
+            .unwrap();
+
+        // Same discovery-poll rationale as the unicast-only test above:
+        // SPDP/SEDP discovery between two independent participants is not
+        // instantaneous. A timeout here is treated as a skip, not a
+        // failure: real UDP multicast fan-out is, unlike unicast,
+        // genuinely environment-dependent — some CI sandboxes/hosts allow
+        // binding and joining the user-data multicast group (so `a`'s
+        // writer commits to the multicast-only send path, with no
+        // per-write unicast fallback) yet still never deliver a packet
+        // sent to it back to a local listener (observed on macOS GitHub
+        // Actions runners; see `spdp.rs`'s
+        // `send_announcement_reaches_a_real_multicast_listener` for the
+        // same caveat on the SPDP multicast group, and
+        // `participant.rs`'s
+        // `besteffort_write_delivers_via_configured_multicast_group_not_unicast`
+        // for the lower-level, environment-independent proof of the same
+        // send-path-selection logic this test exercises end-to-end).
+        let Ok(Some(sample)) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let _ = pub_.write(b"multicast-hello".to_vec()).await;
+                if let Ok(Some(sample)) =
+                    tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await
+                {
+                    return Some(sample);
+                }
+            }
+        })
+        .await
+        else {
+            return;
+        };
+        assert_eq!(sample.payload, b"multicast-hello");
+        assert_eq!(sample.topic, "MulticastTopic");
     }
 }

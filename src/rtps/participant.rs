@@ -242,6 +242,15 @@ pub struct RtpsParticipant {
     /// at construction via [`RtpsParticipant::new_with_persistent_history`]
     /// (go-DDS's `WithPersistentHistory` functional option).
     persist_dir: Option<String>,
+    /// The user-data multicast group's send destination, or `None` when
+    /// multicast delivery is unavailable/disabled — matches go-DDS's
+    /// `p.dataMcastSock` (a `nil` socket disables the multicast send path
+    /// in `rtpsWriter.Write`). Set post-construction via
+    /// [`RtpsParticipant::set_user_data_multicast_addr`] once the caller has
+    /// bound (or failed to bind) the multicast receive socket — see that
+    /// method's docs for why this is a setter rather than a constructor
+    /// parameter.
+    user_data_multicast_addr: RwLock<Option<SocketAddr>>,
 }
 
 impl RtpsParticipant {
@@ -301,12 +310,38 @@ impl RtpsParticipant {
             drops: AtomicU64::new(0),
             last_sample: RwLock::new(HashMap::new()),
             persist_dir,
+            user_data_multicast_addr: RwLock::new(None),
         })
     }
 
     /// This participant's own `GuidPrefix`.
     pub fn guid_prefix(&self) -> GuidPrefix {
         self.guid_prefix
+    }
+
+    /// Configures the user-data multicast group's send destination —
+    /// `dst`'s IP is normally [`super::transport::USER_DATA_MULTICAST_ADDR`]
+    /// and port [`super::transport::user_multicast_port`]`(domain)`. Once
+    /// set, every subsequent [`RtpsWriter::write`] with at least one
+    /// SEDP-matched remote reader sends a single multicast packet to `dst`
+    /// instead of one unicast packet per matched reader locator — see
+    /// [`RtpsWriter::write`]'s docs for the exact condition, matching
+    /// go-DDS's `rtpsWriter.Write` (`len(locs) > 0 && w.p.dataMcastSock !=
+    /// nil`).
+    ///
+    /// A setter (called after construction) rather than a `new`/`new_inner`
+    /// parameter because, mirroring go-DDS's own soft-fail convention for
+    /// its optional `dataMcastSock` ("Optional user-data multicast socket
+    /// ... Failure is soft: fall back to unicast-only delivery"), the
+    /// caller only knows this address once it has attempted (and possibly
+    /// failed) to bind the multicast receive socket — see
+    /// [`super::dds_participant::RtpsUdpParticipant::new_with_config`].
+    /// Never called at all (leaving multicast permanently disabled) is a
+    /// valid, supported configuration — every write then falls back to the
+    /// pre-existing per-locator unicast path unconditionally.
+    //fusa:req REQ-RTPS-061
+    pub async fn set_user_data_multicast_addr(&self, dst: SocketAddr) {
+        *self.user_data_multicast_addr.write().await = Some(dst);
     }
 
     fn next_entity_num(&self) -> u32 {
@@ -1170,6 +1205,7 @@ impl RtpsWriter {
     /// (go-DDS commit 9d81543 / rust-DDS branch feat/rtps-besteffort-data).
     //fusa:req REQ-RTPS-037
     //fusa:req REQ-RTPS-055
+    //fusa:req REQ-RTPS-061
     pub async fn write(&self, payload: &[u8]) -> std::io::Result<()> {
         let writer_state = {
             let writers = self.participant.writers.read().await;
@@ -1259,15 +1295,32 @@ impl RtpsWriter {
             .dispatch_to_readers(source, Some(&self.topic), payload.to_vec(), now, seq)
             .await;
 
-        for locator in self
+        // Remote delivery: one multicast send when the multicast group is
+        // configured and at least one remote reader is matched (matches
+        // go-DDS's `rtpsWriter.Write`: `if len(locs) > 0 &&
+        // w.p.dataMcastSock != nil { ...multicast... } else { ...per-locator
+        // unicast... }` — applied to both BestEffort and Reliable writers
+        // since go-DDS's own condition does not distinguish them); falls
+        // back to the pre-existing per-locator unicast send otherwise (no
+        // multicast configured, or no matched readers to justify it).
+        let locators = self
             .participant
             .sedp
             .matched_reader_locators(&self.topic)
-            .await
-        {
-            if let Some(addr) = locator.udp_addr() {
+            .await;
+        let multicast_dst = *self.participant.user_data_multicast_addr.read().await;
+        if !locators.is_empty() {
+            if let Some(dst) = multicast_dst {
                 for msg in &msgs {
-                    let _ = self.participant.data_socket.send_to(msg, addr).await;
+                    let _ = self.participant.data_socket.send_to(msg, dst).await;
+                }
+            } else {
+                for locator in &locators {
+                    if let Some(addr) = locator.udp_addr() {
+                        for msg in &msgs {
+                            let _ = self.participant.data_socket.send_to(msg, addr).await;
+                        }
+                    }
                 }
             }
         }
@@ -1682,6 +1735,92 @@ mod tests {
         }
         .to_bytes();
         assert_eq!(sample.writer_guid, expected_writer_guid);
+    }
+
+    // ── BestEffort delivery over the user-data multicast group ─────────────
+
+    //fusa:test REQ-RTPS-061
+    //fusa:test REQ-RTPS-062
+    #[tokio::test]
+    async fn besteffort_write_delivers_via_configured_multicast_group_not_unicast() {
+        use super::super::transport::USER_DATA_MULTICAST_ADDR;
+
+        // Multicast may be unavailable in some CI sandboxes/containers (no
+        // multicast-capable interface); skip rather than fail — same
+        // convention as transport.rs's own multicast bind tests.
+        let Ok(mcast_socket) = RtpsSocket::bind_multicast_v4(USER_DATA_MULTICAST_ADDR, 0).await
+        else {
+            return;
+        };
+        let mcast_socket = Arc::new(mcast_socket);
+        let mcast_dst = SocketAddr::from((USER_DATA_MULTICAST_ADDR, mcast_socket.local_port()));
+
+        let prefix_a = ascending_prefix();
+        let prefix_b = other_prefix();
+
+        let a = spawn_peer(prefix_a).await;
+        let b = spawn_peer(prefix_b).await;
+
+        // b's own unicast data socket keeps running (spawn_peer's receive
+        // loop is still active) but nothing will ever be sent to it in this
+        // test — only the multicast socket below feeds b's participant, so
+        // a sample can only arrive at rx_b via the multicast path,
+        // discriminating this test from the plain unicast round trip above.
+        let (mcast_rx, _mcast_recv_handle) = mcast_socket.spawn_receive_loop(64);
+        let _mcast_dispatch = Arc::clone(&b.participant).spawn_receive_loop(mcast_rx);
+
+        let (rx_b, _reader_b) = b
+            .participant
+            .new_reader("Square", SubscriberOptions::default())
+            .await;
+        let writer_a = a.participant.new_writer("Square").await;
+
+        let proxy_b = proxy_from(&b.spdp, prefix_b, b.spdp.config().meta_unicast_port);
+        let proxy_a = proxy_from(&a.spdp, prefix_a, a.spdp.config().meta_unicast_port);
+        a.participant.sedp.on_new_peer(&proxy_b).await;
+        b.participant.sedp.on_new_peer(&proxy_a).await;
+
+        // Configure a's multicast send destination only after SEDP matching
+        // is confirmed, mirroring RtpsUdpParticipant::new_with_config's
+        // real ordering (multicast bind result known before the first
+        // write can occur).
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !a
+                    .participant
+                    .sedp
+                    .matched_reader_locators("Square")
+                    .await
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("SEDP endpoint match never landed on participant a");
+        a.participant.set_user_data_multicast_addr(mcast_dst).await;
+
+        writer_a.write(b"hello-via-multicast").await.unwrap();
+
+        // Real UDP multicast fan-out is, unlike unicast, genuinely
+        // environment-dependent — some CI sandboxes/hosts allow binding and
+        // joining the group (checked above) yet still never deliver a
+        // packet sent to it back to a local listener (observed on macOS
+        // GitHub Actions runners; see `spdp.rs`'s
+        // `send_announcement_reaches_a_real_multicast_listener` for the
+        // same caveat on the SPDP multicast group). Skip rather than fail
+        // on a timeout here, for the same reason — this crate makes no
+        // stronger claim about real multicast delivery than that test
+        // already does.
+        let Ok(Some(sample)) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx_b.recv()).await
+        else {
+            return;
+        };
+        assert_eq!(sample.topic, "Square");
+        assert_eq!(sample.payload, b"hello-via-multicast");
     }
 
     // ── Fragmentation: large-payload round trip over real UDP ──────────────

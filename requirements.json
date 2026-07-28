@@ -1313,6 +1313,27 @@
       "text": "The system shall allow a participant's SPDP configuration to carry a list of static peer unicast addresses and, independently, a flag disabling the SPDP multicast send; when sending an SPDP announcement, the system shall send the same ParticipantData payload directly (unicast) to every configured peer address, in addition to the multicast group unless multicast is disabled, in which case only the configured peer addresses are sent to; the ParticipantData payload and RTPS message framing shall be unchanged from the multicast case (no new wire format), and an incoming SPDP announcement shall be processed identically regardless of whether it arrived via a multicast-joined socket or a unicast one.",
       "category": "functional",
       "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-060",
+      "title": "User-data multicast group and port formula",
+      "text": "The system shall define the RTPS 2.3 §9.6.1 user-data multicast group IPv4 address (239.255.0.2) and a domain-scoped user-data multicast port formula (port_base + domain_gain*domain + 1, one port shared by every participant on the domain, no per-participant term), matching go-DDS's userDataMulticastAddr/userMulticastPort exactly.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-061",
+      "title": "BestEffort writer multicast delivery",
+      "text": "The system shall allow a participant's user-data multicast send destination to be configured independently of construction, and a writer's write shall, when that destination is configured and at least one remote reader is currently SEDP-matched to the writer's topic, send each wire message exactly once to the configured multicast destination instead of once per matched reader's unicast locator; when no multicast destination is configured, or no remote reader is currently matched, the writer's existing per-locator unicast send path shall be used unchanged, matching go-DDS's rtpsWriter.Write dataMcastSock behaviour.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-RTPS-062",
+      "title": "User-data multicast receive wiring and config gating",
+      "text": "The system's public UDP-backed participant shall, unless configured with multicast disabled, attempt to bind and join the user-data multicast group at construction, treating a bind failure as non-fatal (falling back to unicast-only delivery, never propagated as a construction error); when the bind succeeds, the system shall configure this participant's writers to send to that multicast group and shall feed every datagram received on that socket into the same dispatch path used for the unicast data socket, so a matched local reader receives a multicast-delivered sample identically to a unicast-delivered one; the same configuration flag that disables SPDP discovery multicast shall also disable user-data multicast, so a single flag covers both multicast sockets a participant ever binds.",
+      "category": "functional",
+      "criticality": "medium"
     }
   ]
 }
