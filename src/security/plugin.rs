@@ -18,16 +18,17 @@
 //! checklist item ("Pluggable payload security trait (`SecurityPlugin`)")
 //! and only that item: the trait plus [`NullPlugin`] (go-DDS's identity
 //! transform, defined in the same file as the interface it implements, so
-//! ported alongside it here). The five plugins/mechanisms that make the
-//! trait do something non-trivial — an HMAC-SHA-256 integrity plugin, an
-//! AES-256-GCM encryption plugin, a topic ACL (`AccessPolicy`), an
-//! anti-replay guard (`ReplayGuard`), and HMAC-SHA-256 discovery
-//! authentication — are separate, later checklist items under the same
-//! milestone, not implemented here. Likewise, wiring `seal`/`open` calls
-//! into `crate::rtps::participant::RtpsParticipant`'s write/receive paths
-//! is deferred until there is a non-identity plugin worth wiring in; the
-//! trait itself is transport-agnostic and does not require that wiring to
-//! exist or to be tested.
+//! ported alongside it here). Of the five plugins/mechanisms that make the
+//! trait do something non-trivial, an HMAC-SHA-256 integrity plugin is now
+//! landed as [`crate::security::hmac::HmacPlugin`] (the milestone's second
+//! checklist item); an AES-256-GCM encryption plugin, a topic ACL
+//! (`AccessPolicy`), an anti-replay guard (`ReplayGuard`), and HMAC-SHA-256
+//! discovery authentication remain separate, later checklist items under
+//! the same milestone, not implemented here. Likewise, wiring `seal`/`open`
+//! calls into `crate::rtps::participant::RtpsParticipant`'s write/receive
+//! paths is deferred — including for `HmacPlugin` — until a caller wires
+//! a concrete plugin in; the trait itself is transport-agnostic and does
+//! not require that wiring to exist or to be tested.
 
 use thiserror::Error;
 

@@ -998,7 +998,39 @@ harder to change.
   SecurityPlugin>` object-safety, and a multi-task `tokio::spawn` test
   sharing one `Arc<dyn SecurityPlugin>` to exercise the `Send + Sync`
   bound.
-- [ ] HMAC-SHA-256 integrity plugin
+- [x] HMAC-SHA-256 integrity plugin — landed as `src/security/hmac.rs`'s
+  `HmacPlugin`, a second concrete `SecurityPlugin` implementation
+  alongside `NullPlugin`. Direct port of go-DDS's `security.HMACPlugin`
+  (`github.com/SoundMatt/go-DDS`, `security/security.go`): `seal` appends
+  a 32-byte HMAC-SHA-256 tag computed over the plaintext (wire format `|
+  plaintext... | HMAC[32] |`, identical to go-DDS's), and `open` verifies
+  that tag in constant time (`hmac::Mac::verify_slice`) before stripping
+  it and returning the plaintext, rejecting anything shorter than the tag
+  with `SecurityError::PayloadTooShort` and any tag that fails to verify
+  (tampered plaintext, tampered/truncated tag, or a mismatched key) with
+  `SecurityError::VerificationFailed` — never a panic, and never
+  plaintext on failure. Provides integrity and peer authentication, not
+  confidentiality (the plaintext itself is not encrypted), matching
+  go-DDS's own scoping for this plugin; the AES-256-GCM encryption plugin
+  below is the separate, later item that adds confidentiality. Built on
+  the RustCrypto `hmac`/`sha2` crates (pure Rust, no `unsafe`). Byte-exact
+  against go-DDS: unit tests pin sealed output for five `(key,
+  plaintext)` pairs against reference vectors generated directly from a
+  fresh go-DDS clone's own `security.HMACPlugin.Seal`, not hand-derived.
+  As with the trait itself, `seal`/`open` remain unwired from
+  `rtps::participant::RtpsParticipant`'s write/receive paths — out of
+  scope until a caller wires a concrete plugin in. Adds
+  REQ-SEC-020/REQ-SEC-021 (continuing after REQ-SEC-016..019) with full
+  `fusa:req`/`fusa:test` traceability. Zero `unsafe`
+  (REQ-ASIL-002/REQ-MEM-001); no `.unwrap()` on any user-visible
+  (non-test) path (REQ-ASIL-003). Unit-tested per this crate's
+  established per-module convention: go-DDS reference-vector byte
+  equality, seal/open roundtrip, tag-length assertion, payload-too-short
+  rejection, tampered-plaintext/tampered-tag/truncated-ciphertext/
+  wrong-key verification-failure rejection, cross-instance
+  same-key interop, arbitrary key length acceptance, `Box<dyn
+  SecurityPlugin>`/`Arc<dyn SecurityPlugin>` object-safety, and a
+  multi-task `tokio::spawn` concurrency test.
 - [ ] AES-256-GCM encryption plugin
 - [ ] Topic ACL (`AccessPolicy`)
 - [ ] Anti-replay guard (`ReplayGuard`)
