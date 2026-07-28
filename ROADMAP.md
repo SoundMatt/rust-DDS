@@ -758,7 +758,57 @@ harder to change.
   (`REQ-RTPS-061`), and a `RtpsUdpParticipant`-level two-process-equivalent
   pub/sub round trip with multicast left on by default (`REQ-RTPS-062`).
   Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001).
-- [ ] IPv4 and IPv6 multicast support
+- [x] IPv4 and IPv6 multicast support — wires sub-phase 3's already-landed
+  IPv6 transport primitives (`transport::bind_unicast_v6`/`bind_multicast_v6`,
+  `SPDP_MULTICAST_ADDR_V6`) into the public `RtpsUdpParticipant` API, landed
+  in [rust-DDS#36](https://github.com/SoundMatt/rust-DDS/pull/36):
+  `RtpsUdpParticipantConfig::with_ipv6` (builder style, matching
+  `with_peer_locators`/`with_no_multicast`) switches every socket this
+  participant binds — meta/data unicast, SPDP multicast, user-data
+  multicast — from IPv4 to IPv6 together, plus the new
+  `transport::USER_DATA_MULTICAST_ADDR_V6` (`FF03::2`, one site-local group
+  past `SPDP_MULTICAST_ADDR_V6`) for the user-data half. This is a
+  deliberate **address-family switch, not a dual-stack add-on** — the one
+  documented deviation from go-DDS's own `WithIPv6` `Option`, which *adds* a
+  second, parallel set of IPv6 sockets alongside the IPv4 ones. Inspecting a
+  fresh go-DDS clone found that go-DDS's own IPv6 sockets are, today, only
+  ever wired into the user-data receive path — `mcastSockV6`/`metaSockV6`
+  are bound but never threaded into any SPDP/SEDP receive loop, so go-DDS's
+  `WithIPv6` cannot actually *discover* a peer over IPv6 at all. A
+  single-family switch avoids reproducing that gap: `SpdpConfig::ipv6`/
+  `SedpConfig::ipv6` (new fields, same builder idiom) make
+  `build_participant_data`/`build_endpoint_data` advertise
+  `LOCATOR_KIND_UDPV6` zero-address locators instead of `LOCATOR_KIND_UDPV4`
+  ones, `SpdpService::send_announcement` sends to `SPDP_MULTICAST_ADDR_V6`
+  instead of `SPDP_MULTICAST_ADDR`, and both modules' zero-address fill-in
+  logic (previously IPv4-only, silently dropping an IPv6 sender's address)
+  now dispatches on the decoded locator's own kind against the datagram's
+  real source-address family — so every code path this participant already
+  has (SPDP announce/receive, SEDP announce/receive, BestEffort/Reliable
+  data, both multicast groups) works identically under `with_ipv6()`, over
+  real IPv6 end to end. No go-DDS byte oracle for the IPv6-specific pieces
+  (go-DDS's own `buildParticipantData`/`buildEndpointData` never emit an
+  IPv6 locator, and `USER_DATA_MULTICAST_ADDR_V6` has no go-DDS counterpart
+  at all — go-DDS has no IPv6 user-data multicast socket) — the wire
+  encoding itself is unchanged from what `locator.rs`'s existing
+  `Locator::udp_v6` tests already verify byte-for-byte; what's new here is
+  purely which family gets selected and Rust-side internal-consistency
+  tests cover that. Verified with unit tests in `spdp.rs`/`sedp.rs`
+  (locator-family selection, zero-address fill-in, multicast-destination
+  selection — all deterministic, no real sockets needed) and `transport.rs`
+  (the new constant), an in-process two-`RtpsUdpParticipant`
+  SPDP+SEDP+BestEffort round trip entirely over real IPv6 multicast
+  (`dds_participant.rs`), and a `--ipv6` extension of the live two-process
+  interop harness (`tests/rtps_two_process_interop.rs`,
+  `src/bin/rtps_interop_peer.rs`) mirroring the existing IPv4 case. Per
+  go-DDS's own `WithIPv6` doc comment and this crate's sub-phase 3 IPv6
+  primitives, this carries forward — not upgrades — the **limited interop
+  testing** caveat: proven against this crate's own two independently
+  started participants/processes talking IPv6 to each other, not against a
+  third-party DDS implementation's IPv6 path; every real-IPv6-multicast
+  test soft-skips (not fails) in an environment without a usable
+  IPv6-multicast-capable interface, the same posture every IPv4-multicast
+  test in this crate already has. Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001).
 
 ### Planned — v0.3 — Reliable QoS (Tier 1)
 

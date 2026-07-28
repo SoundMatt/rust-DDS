@@ -22,7 +22,11 @@
 //! — this binary is the thing that case explicitly does not prove) — and
 //! (`--no-multicast`/`--peer`/`--meta-port`) the unicast half of SPDP
 //! discovery from `ROADMAP.md`'s "Planned — v0.2" checklist, the same way,
-//! between two live processes with no multicast socket on either side.
+//! between two live processes with no multicast socket on either side. The
+//! same checklist's "IPv4 and IPv6 multicast support" item is `--ipv6`:
+//! switches every socket this process binds to IPv6 (see
+//! [`rust_dds::rtps::dds_participant::RtpsUdpParticipantConfig::with_ipv6`]'s
+//! docs for the address-family-switch design this flag mirrors).
 //!
 //! Not part of the crate's public library API (this is a `[[bin]]`
 //! target, `rust_dds::rtps` remains internal/not re-exported) and not
@@ -52,7 +56,7 @@ use rust_dds::rtps::participant::RtpsParticipant;
 use rust_dds::rtps::sedp::{SedpConfig, SedpService};
 use rust_dds::rtps::spdp::{SpdpConfig, SpdpService};
 use rust_dds::rtps::transport::{
-    meta_multicast_port, RtpsDatagram, RtpsSocket, SPDP_MULTICAST_ADDR,
+    meta_multicast_port, RtpsDatagram, RtpsSocket, SPDP_MULTICAST_ADDR, SPDP_MULTICAST_ADDR_V6,
 };
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -142,6 +146,13 @@ struct Cli {
     /// [`rust_dds::rtps::spdp::SpdpConfig::peer_locators`].
     #[arg(long)]
     peer: Vec<SocketAddr>,
+    /// Switches every socket this process binds from IPv4 to IPv6 — the
+    /// two-process-interop counterpart of
+    /// [`rust_dds::rtps::dds_participant::RtpsUdpParticipantConfig::with_ipv6`].
+    /// See that method's docs for the address-family-switch (not
+    /// dual-stack) design.
+    #[arg(long, default_value_t = false)]
+    ipv6: bool,
 }
 
 #[derive(Serialize)]
@@ -207,11 +218,21 @@ async fn run(cli: Cli) -> i32 {
     let prefix = guid_prefix(cli.prefix_seed);
     let discovery_timeout = Duration::from_secs(cli.discovery_timeout_secs);
 
-    let meta_socket = match RtpsSocket::bind_unicast_v4(cli.meta_port).await {
+    let meta_bind = if cli.ipv6 {
+        RtpsSocket::bind_unicast_v6(cli.meta_port).await
+    } else {
+        RtpsSocket::bind_unicast_v4(cli.meta_port).await
+    };
+    let meta_socket = match meta_bind {
         Ok(s) => std::sync::Arc::new(s),
         Err(e) => return fail_report(cli.role, prefix, format!("bind meta socket: {e}")),
     };
-    let data_socket = match RtpsSocket::bind_unicast_v4(0).await {
+    let data_bind = if cli.ipv6 {
+        RtpsSocket::bind_unicast_v6(0).await
+    } else {
+        RtpsSocket::bind_unicast_v4(0).await
+    };
+    let data_socket = match data_bind {
         Ok(s) => std::sync::Arc::new(s),
         Err(e) => return fail_report(cli.role, prefix, format!("bind data socket: {e}")),
     };
@@ -228,7 +249,12 @@ async fn run(cli: Cli) -> i32 {
                 format!("domain {} out of range", cli.domain),
             );
         };
-        match RtpsSocket::bind_multicast_v4(SPDP_MULTICAST_ADDR, mcast_port).await {
+        let mcast_bind = if cli.ipv6 {
+            RtpsSocket::bind_multicast_v6(SPDP_MULTICAST_ADDR_V6, mcast_port).await
+        } else {
+            RtpsSocket::bind_multicast_v4(SPDP_MULTICAST_ADDR, mcast_port).await
+        };
+        match mcast_bind {
             Ok(s) => Some(std::sync::Arc::new(s)),
             Err(e) => return fail_report(cli.role, prefix, format!("bind multicast socket: {e}")),
         }
@@ -236,7 +262,7 @@ async fn run(cli: Cli) -> i32 {
 
     log(format!(
         "rtps-interop-peer: role={:?} prefix_seed={} domain={} meta_port={} data_port={} mcast_port={:?} \
-         no_multicast={} peers={:?}",
+         no_multicast={} ipv6={} peers={:?}",
         cli.role,
         cli.prefix_seed,
         cli.domain,
@@ -244,6 +270,7 @@ async fn run(cli: Cli) -> i32 {
         data_socket.local_port(),
         mcast_socket.as_ref().map(|s| s.local_port()),
         cli.no_multicast,
+        cli.ipv6,
         cli.peer,
     ));
 
@@ -261,6 +288,9 @@ async fn run(cli: Cli) -> i32 {
     if cli.no_multicast {
         spdp_cfg = spdp_cfg.with_no_multicast();
     }
+    if cli.ipv6 {
+        spdp_cfg = spdp_cfg.with_ipv6();
+    }
     let spdp = SpdpService::new(spdp_cfg, std::sync::Arc::clone(&meta_socket));
     let _announce_task = std::sync::Arc::clone(&spdp).spawn_announce_loop();
     let _evict_task = std::sync::Arc::clone(&spdp).spawn_evict_loop();
@@ -274,7 +304,10 @@ async fn run(cli: Cli) -> i32 {
         let _spdp_recv_task = std::sync::Arc::clone(&spdp).spawn_receive_loop(mcast_rx);
     }
 
-    let sedp_cfg = SedpConfig::new(prefix, data_socket.local_port());
+    let mut sedp_cfg = SedpConfig::new(prefix, data_socket.local_port());
+    if cli.ipv6 {
+        sedp_cfg = sedp_cfg.with_ipv6();
+    }
     let sedp = SedpService::new(
         sedp_cfg,
         std::sync::Arc::clone(&meta_socket),
