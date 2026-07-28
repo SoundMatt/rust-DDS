@@ -31,6 +31,9 @@
 //!   `src/rtps/participant.rs::tests::reliable_qos_detects_gap_and_retransmits_over_real_udp`,
 //!   which proves the same retransmission logic but entirely within one
 //!   test/process.
+//! - The unicast half of SPDP discovery (`ROADMAP.md`'s "Planned — v0.2"
+//!   checklist item), between two live processes with no multicast socket
+//!   on either side at all (`--no-multicast`/`--peer`).
 //!
 //! `#[ignore]`d by default (real child-process spawning + real UDP
 //! multicast is unsuited to the default cross-platform `cargo test`
@@ -348,6 +351,115 @@ fn reliable_qos_recovers_a_real_dropped_datagram_between_two_live_processes() {
     // original sequence order, not just eventually arrive out of order.
     let seqs: Vec<u64> = received.iter().map(|s| s.sequence_number).collect();
     assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
+}
+
+//fusa:test REQ-RTPS-059
+#[test]
+#[ignore = "spawns real OS processes; run via the rtps-interop CI job"]
+fn unicast_only_discovery_and_besteffort_delivery_between_two_live_processes_with_no_multicast() {
+    // The unicast half of SPDP discovery (`ROADMAP.md`'s "Planned — v0.2"
+    // SPDP checklist item), proved between two real, independent OS
+    // processes rather than in-process: both `--no-multicast` (no
+    // 239.255.0.1 bind/join/send on either side — a live proof, not just
+    // an assertion, that discovery here cannot be riding on multicast) and
+    // `--peer` pointing each process directly at the other's metatraffic
+    // unicast port. Since neither process can query the other's ephemeral
+    // port ahead of time, both bind a fixed `--meta-port` instead — the
+    // same "known in advance" property a real static/TSN peer-locator
+    // deployment (Docker/cloud network, TSN segment) requires.
+    let deadline = Duration::from_secs(30);
+    let writer_meta_port = "39120";
+    let reader_meta_port = "39121";
+    let (writer, reader) = run_writer_and_reader(
+        vec![
+            "--role",
+            "writer",
+            "--topic",
+            "UnicastOnly",
+            "--domain",
+            "213",
+            "--prefix-seed",
+            "41",
+            "--count",
+            "5",
+            "--payload",
+            "unicast",
+            "--discovery-timeout-secs",
+            "15",
+            "--linger-secs",
+            "1",
+            "--no-multicast",
+            "--meta-port",
+            writer_meta_port,
+            "--peer",
+            &format!("127.0.0.1:{reader_meta_port}"),
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        vec![
+            "--role",
+            "reader",
+            "--topic",
+            "UnicastOnly",
+            "--domain",
+            "213",
+            "--prefix-seed",
+            "42",
+            "--count",
+            "5",
+            "--discovery-timeout-secs",
+            "15",
+            "--recv-timeout-secs",
+            "20",
+            "--no-multicast",
+            "--meta-port",
+            reader_meta_port,
+            "--peer",
+            &format!("127.0.0.1:{writer_meta_port}"),
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        deadline,
+    );
+
+    assert!(writer.ok, "writer did not report success: {writer:?}");
+    assert!(reader.ok, "reader did not report success: {reader:?}");
+
+    // SPDP discovered both sides — via unicast only, no multicast socket
+    // ever bound on either side.
+    assert!(
+        writer.spdp_peers_known >= 1,
+        "writer never discovered a peer via unicast SPDP: {writer:?}"
+    );
+    assert!(
+        reader.spdp_peers_known >= 1,
+        "reader never discovered a peer via unicast SPDP: {reader:?}"
+    );
+
+    // SEDP matched the writer/reader pair (over the same metatraffic
+    // unicast socket carrying SPDP).
+    assert!(
+        reader.sedp_endpoint_matches >= 1,
+        "reader's SEDP never recorded an endpoint match: {reader:?}"
+    );
+
+    // Samples flowed end-to-end.
+    assert_eq!(writer.sent, Some(5));
+    let received = reader.received.expect("reader report missing `received`");
+    assert_eq!(received.len(), 5);
+    let payloads: Vec<&str> = received.iter().map(|s| s.payload_utf8.as_str()).collect();
+    assert_eq!(
+        payloads,
+        vec![
+            "unicast-0",
+            "unicast-1",
+            "unicast-2",
+            "unicast-3",
+            "unicast-4"
+        ]
+    );
 }
 
 #[test]

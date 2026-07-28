@@ -66,7 +66,11 @@
 //! discover each other via SPDP multicast and exchange samples over real
 //! UDP — see `src/bin/rtps_interop_peer.rs` and
 //! `tests/rtps_two_process_interop.rs` for the live two-process proof this
-//! wiring reuses unmodified.
+//! wiring reuses unmodified. For static/configured unicast peer discovery
+//! (multicast unavailable or undesirable — Docker/cloud networks, TSN
+//! segments) use [`RtpsUdpParticipant::new_with_config`] with
+//! [`RtpsUdpParticipantConfig::with_peer_locators`]/
+//! [`RtpsUdpParticipantConfig::with_no_multicast`] instead of `new`.
 //!
 //! # QoS → RTPS engine mapping
 //!
@@ -96,10 +100,12 @@
 //! call — only `new_publisher`/`new_subscriber` after `close()` do (both
 //! return `Error::Closed`).
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::error::Error;
@@ -113,8 +119,85 @@ use super::participant::{RtpsParticipant, RtpsReader, RtpsWriter};
 use super::sedp::{SedpConfig, SedpService};
 use super::spdp::{SpdpConfig, SpdpService};
 use super::transport::{
-    data_unicast_port, meta_multicast_port, meta_unicast_port, RtpsSocket, SPDP_MULTICAST_ADDR,
+    data_unicast_port, meta_multicast_port, meta_unicast_port, RtpsDatagram, RtpsSocket,
+    SPDP_MULTICAST_ADDR,
 };
+
+// ---------------------------------------------------------------------------
+// RtpsUdpParticipantConfig
+// ---------------------------------------------------------------------------
+
+/// Optional configuration for [`RtpsUdpParticipant::new_with_config`]: static
+/// peer unicast addresses for SPDP discovery, and/or disabling SPDP
+/// multicast entirely — the public-API wiring for `ROADMAP.md`'s "Planned —
+/// v0.2" checklist item "SPDP participant discovery (multicast +
+/// unicast)"'s unicast half. Builder style, matching this crate's
+/// established `SpdpConfig`/`SedpConfig` config idiom.
+/// [`RtpsUdpParticipant::new`] is equivalent to
+/// `new_with_config(domain, RtpsUdpParticipantConfig::default())` — the
+/// existing multicast-only behaviour, unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RtpsUdpParticipantConfig {
+    peer_locators: Vec<SocketAddr>,
+    no_multicast: bool,
+}
+
+impl RtpsUdpParticipantConfig {
+    /// An empty config: no static peers, multicast enabled — identical to
+    /// [`RtpsUdpParticipant::new`]'s behaviour.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds static peer unicast addresses (builder style) that this
+    /// participant sends SPDP announcements directly to, in addition to (or,
+    /// with [`RtpsUdpParticipantConfig::with_no_multicast`], instead of) the
+    /// multicast group. Forwarded to [`super::spdp::SpdpConfig::peer_locators`].
+    /// Additive across repeated calls.
+    //fusa:req REQ-RTPS-059
+    pub fn with_peer_locators(mut self, addrs: impl IntoIterator<Item = SocketAddr>) -> Self {
+        self.peer_locators.extend(addrs);
+        self
+    }
+
+    /// Disables SPDP multicast entirely (builder style): no multicast
+    /// socket is bound/joined, and no SPDP announcement is sent to the
+    /// multicast group — only to
+    /// [`RtpsUdpParticipantConfig::with_peer_locators`]'s addresses.
+    /// Intended to be combined with a non-empty peer-locator list for
+    /// unicast-only discovery (Docker/cloud networks and TSN segments where
+    /// multicast routing is unavailable or undesirable).
+    //fusa:req REQ-RTPS-059
+    pub fn with_no_multicast(mut self) -> Self {
+        self.no_multicast = true;
+        self
+    }
+}
+
+/// Fans a single socket receive loop's output out to every sender in
+/// `senders`, cloning each datagram. Needed because
+/// [`RtpsSocket::spawn_receive_loop`]'s `mpsc::Receiver` is single-consumer,
+/// while the metatraffic unicast socket now carries traffic for two
+/// consumers: SEDP (always) and SPDP (once a peer's unicast announcement
+/// arrives on it — see [`SpdpConfig`]'s "Unicast peer discovery" docs).
+/// Exits once `rx`'s sender is dropped (the socket's receive task ending),
+/// same shutdown contract as every other loop in this module tree.
+fn spawn_datagram_fanout(
+    mut rx: mpsc::Receiver<RtpsDatagram>,
+    senders: Vec<mpsc::Sender<RtpsDatagram>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(datagram) = rx.recv().await {
+            for tx in &senders {
+                // A closed downstream receiver just means that consumer is
+                // no longer interested (or was never wired up); dropping
+                // its copy of this datagram is fine, matching every other
+                // best-effort channel send in this module tree.
+                let _ = tx.send(datagram.clone()).await;
+            }
+        }
+    })
+}
 
 // ---------------------------------------------------------------------------
 // RtpsUdpParticipant
@@ -146,7 +229,10 @@ pub struct RtpsUdpParticipant {
     /// clones of the sockets they need to *send* on.
     _meta_socket: Arc<RtpsSocket>,
     _data_socket: Arc<RtpsSocket>,
-    _mcast_socket: Arc<RtpsSocket>,
+    /// `None` when constructed with
+    /// [`RtpsUdpParticipantConfig::with_no_multicast`] — no SPDP multicast
+    /// socket is bound/joined in that case at all (unicast-only discovery).
+    _mcast_socket: Option<Arc<RtpsSocket>>,
     /// Every still-registered subscriber's queue, so `close()` can close
     /// them all — mirrors `mock::Broker`'s per-topic subscriber list, but
     /// flat (this participant does not need per-topic grouping for this
@@ -178,16 +264,33 @@ impl RtpsUdpParticipant {
     //fusa:req REQ-RTPS-041
     //fusa:req REQ-PART-001
     pub async fn new(domain: Domain) -> Result<Arc<Self>, Error> {
+        Self::new_with_config(domain, RtpsUdpParticipantConfig::default()).await
+    }
+
+    /// Like [`RtpsUdpParticipant::new`], but with static peer unicast
+    /// addresses and/or multicast disabled per `config` — the public-API
+    /// wiring for `ROADMAP.md`'s "Planned — v0.2" SPDP unicast-discovery
+    /// item. When `config.no_multicast` is unset (the default), behaviour
+    /// is identical to `new` (no SPDP multicast socket is bound at all when
+    /// it *is* set — see [`RtpsUdpParticipantConfig::with_no_multicast`]).
+    /// `config.peer_locators` are forwarded to
+    /// [`super::spdp::SpdpConfig::peer_locators`] so
+    /// [`super::spdp::SpdpService::send_announcement`] unicasts directly to
+    /// each one, in addition to (or, with `no_multicast`, instead of) the
+    /// multicast group.
+    ///
+    /// Returns the same error cases as [`RtpsUdpParticipant::new`].
+    //fusa:req REQ-RTPS-041
+    //fusa:req REQ-RTPS-059
+    //fusa:req REQ-PART-001
+    pub async fn new_with_config(
+        domain: Domain,
+        config: RtpsUdpParticipantConfig,
+    ) -> Result<Arc<Self>, Error> {
         validate_domain(domain)?;
         let d = domain.0 as u32;
         let guid_prefix = random_guid_prefix();
 
-        let mcast_port = meta_multicast_port(d).ok_or_else(|| {
-            Error::Other(format!(
-                "rtps: domain {} out of range for the SPDP multicast port formula",
-                domain.0
-            ))
-        })?;
         let meta_base_port = meta_unicast_port(d, 0).ok_or_else(|| {
             Error::Other(format!(
                 "rtps: domain {} out of range for the metatraffic unicast port formula",
@@ -211,36 +314,69 @@ impl RtpsUdpParticipant {
                 .await
                 .map_err(|e| Error::Other(format!("rtps: bind user-data socket: {e}")))?,
         );
-        let mcast_socket = Arc::new(
-            RtpsSocket::bind_multicast_v4(SPDP_MULTICAST_ADDR, mcast_port)
-                .await
-                .map_err(|e| Error::Other(format!("rtps: bind SPDP multicast socket: {e}")))?,
-        );
+        let mcast_socket = if config.no_multicast {
+            None
+        } else {
+            let mcast_port = meta_multicast_port(d).ok_or_else(|| {
+                Error::Other(format!(
+                    "rtps: domain {} out of range for the SPDP multicast port formula",
+                    domain.0
+                ))
+            })?;
+            Some(Arc::new(
+                RtpsSocket::bind_multicast_v4(SPDP_MULTICAST_ADDR, mcast_port)
+                    .await
+                    .map_err(|e| Error::Other(format!("rtps: bind SPDP multicast socket: {e}")))?,
+            ))
+        };
 
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
-        // SPDP: announce this participant periodically, receive/store peer
+        // SPDP: announce this participant periodically (multicast and/or
+        // directly to config.peer_locators), receive/store peer
         // announcements, evict stale peers.
-        let spdp_cfg = SpdpConfig::new(
+        let mut spdp_cfg = SpdpConfig::new(
             d,
             guid_prefix,
             meta_socket.local_port(),
             data_socket.local_port(),
-        );
+        )
+        .with_peer_locators(config.peer_locators.iter().copied());
+        if config.no_multicast {
+            spdp_cfg = spdp_cfg.with_no_multicast();
+        }
         let spdp = SpdpService::new(spdp_cfg, Arc::clone(&meta_socket));
         tasks.push(Arc::clone(&spdp).spawn_announce_loop());
         tasks.push(Arc::clone(&spdp).spawn_evict_loop());
-        let (mcast_rx, mcast_recv_task) = mcast_socket.spawn_receive_loop(64);
-        tasks.push(mcast_recv_task);
-        tasks.push(Arc::clone(&spdp).spawn_receive_loop(mcast_rx));
+        if let Some(mcast_socket) = &mcast_socket {
+            let (mcast_rx, mcast_recv_task) = mcast_socket.spawn_receive_loop(64);
+            tasks.push(mcast_recv_task);
+            tasks.push(Arc::clone(&spdp).spawn_receive_loop(mcast_rx));
+        }
 
         // SEDP: exchange publication/subscription announcements with every
         // SPDP-discovered peer, matching local/remote endpoints by topic.
         let sedp_cfg = SedpConfig::new(guid_prefix, data_socket.local_port());
         let sedp = SedpService::new(sedp_cfg, Arc::clone(&meta_socket), Arc::clone(&spdp));
+
+        // A peer's unicast SPDP announcement (config.peer_locators on their
+        // side) arrives on this participant's metatraffic unicast socket —
+        // the same socket SEDP unicast traffic already uses (see
+        // SpdpConfig's "Unicast peer discovery" docs) — so fan its receive
+        // loop out to both SPDP and SEDP rather than SEDP alone, regardless
+        // of whether local multicast is enabled: a multicast-enabled
+        // participant should still recognise a peer that unicasts directly
+        // to it.
         let (meta_rx, meta_recv_task) = meta_socket.spawn_receive_loop(64);
         tasks.push(meta_recv_task);
-        tasks.push(Arc::clone(&sedp).spawn_receive_loop(meta_rx));
+        let (spdp_meta_tx, spdp_meta_rx) = mpsc::channel(64);
+        let (sedp_meta_tx, sedp_meta_rx) = mpsc::channel(64);
+        tasks.push(spawn_datagram_fanout(
+            meta_rx,
+            vec![spdp_meta_tx, sedp_meta_tx],
+        ));
+        tasks.push(Arc::clone(&spdp).spawn_receive_loop(spdp_meta_rx));
+        tasks.push(Arc::clone(&sedp).spawn_receive_loop(sedp_meta_rx));
 
         // RTPS participant runtime: BestEffort/Reliable DATA data path over
         // the data socket, fed by both discovery services' match output.
@@ -636,5 +772,110 @@ mod tests {
                 .await,
             Err(Error::TopicEmpty)
         ));
+    }
+
+    // ── Unicast peer discovery (RtpsUdpParticipantConfig) ────────────────
+
+    //fusa:test REQ-RTPS-059
+    #[test]
+    fn rtps_udp_participant_config_builder_stores_peer_locators_and_no_multicast() {
+        let peer = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 7400));
+        let cfg = RtpsUdpParticipantConfig::new()
+            .with_peer_locators([peer])
+            .with_no_multicast();
+        assert_eq!(cfg.peer_locators, vec![peer]);
+        assert!(cfg.no_multicast);
+    }
+
+    #[test]
+    fn rtps_udp_participant_config_default_is_multicast_only_no_peers() {
+        let cfg = RtpsUdpParticipantConfig::default();
+        assert!(cfg.peer_locators.is_empty());
+        assert!(!cfg.no_multicast);
+    }
+
+    // Two distinct, dedicated domains (not TEST_DOMAIN, which a
+    // single-participant test above already owns) — each participant's
+    // metatraffic unicast port is the RTPS 2.3 §9.6.1 formula value for
+    // its own domain at participant index 0
+    // (`super::transport::meta_unicast_port`), computed rather than
+    // queried after the fact so each side's `peer_locators` can be built
+    // *before* either participant is constructed — exactly the "known in
+    // advance" property real static/TSN peer-locator deployments have.
+    const UNICAST_ONLY_DOMAIN_A: Domain = Domain(218);
+    const UNICAST_ONLY_DOMAIN_B: Domain = Domain(219);
+
+    //fusa:test REQ-RTPS-059
+    #[tokio::test]
+    async fn unicast_only_discovery_and_delivery_between_two_participants_with_no_multicast() {
+        // The unicast half of SPDP discovery, end-to-end through the
+        // public Participant/Publisher/Subscriber traits, between two
+        // separate RtpsUdpParticipant instances (unlike this file's other
+        // pub/sub tests, which use one participant for both ends) — with
+        // no SPDP multicast socket bound on either side at all.
+        let Some(a_meta_port) = meta_unicast_port(UNICAST_ONLY_DOMAIN_A.0 as u32, 0) else {
+            return;
+        };
+        let Some(b_meta_port) = meta_unicast_port(UNICAST_ONLY_DOMAIN_B.0 as u32, 0) else {
+            return;
+        };
+        let a_addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, a_meta_port));
+        let b_addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, b_meta_port));
+
+        let Ok(a) = RtpsUdpParticipant::new_with_config(
+            UNICAST_ONLY_DOMAIN_A,
+            RtpsUdpParticipantConfig::new()
+                .with_no_multicast()
+                .with_peer_locators([b_addr]),
+        )
+        .await
+        else {
+            return; // no free port / no usable interface in this environment
+        };
+        let Ok(b) = RtpsUdpParticipant::new_with_config(
+            UNICAST_ONLY_DOMAIN_B,
+            RtpsUdpParticipantConfig::new()
+                .with_no_multicast()
+                .with_peer_locators([a_addr]),
+        )
+        .await
+        else {
+            return;
+        };
+        let a: Arc<dyn Participant> = a;
+        let b: Arc<dyn Participant> = b;
+
+        let (rx, _sub) = b
+            .new_subscriber(
+                "UnicastOnlyTopic",
+                DEFAULT_QOS.clone(),
+                SubscriberOptions::default(),
+            )
+            .await
+            .unwrap();
+        let pub_ = a
+            .new_publisher("UnicastOnlyTopic", DEFAULT_QOS.clone())
+            .await
+            .unwrap();
+
+        // Discovery (SPDP unicast announce -> SEDP unicast match) between
+        // two independent participants is not instantaneous; retry the
+        // write until it lands, rather than assuming any fixed settle
+        // time — matches the discovery-poll pattern
+        // `src/bin/rtps_interop_peer.rs` uses for the same reason.
+        let sample = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let _ = pub_.write(b"unicast-hello".to_vec()).await;
+                if let Ok(Some(sample)) =
+                    tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await
+                {
+                    return sample;
+                }
+            }
+        })
+        .await
+        .expect("unicast-only discovery and delivery did not complete in time");
+        assert_eq!(sample.payload, b"unicast-hello");
+        assert_eq!(sample.topic, "UnicastOnlyTopic");
     }
 }
