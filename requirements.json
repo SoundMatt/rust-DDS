@@ -1551,6 +1551,27 @@
       "text": "HmacDiscoveryPlugin::verify_discovery shall return false for a nil/empty tag and otherwise recompute and compare the expected tag in constant time, returning true only for a tag produced by sign_discovery under the same key and guid_prefix; when SpdpService's configured discovery_plugin rejects a received announcement's PID_DISCOVERY_TOKEN (or the token is absent) against the sending participant's GuidPrefix, handle_packet shall silently discard that announcement without storing it as a known peer or notifying SEDP, matching go-DDS's spdpService.handlePacket verification gate; this check shall never panic on malformed or missing token input.",
       "category": "cybersecurity",
       "criticality": "critical"
+    },
+    {
+      "id": "REQ-MON-001",
+      "title": "HealthStatus and Health value types",
+      "text": "The system shall provide a HealthStatus enum with exactly three variants (Ok, Degraded, Down, defaulting to Ok) and a Health struct pairing a HealthStatus with an optional details string, matching go-DDS's dds.HealthStatus/dds.Health (dds.go); HealthStatus's Display implementation and its serde representation shall both render the lowercase strings \"ok\"/\"degraded\"/\"down\", matching go-DDS's HealthStatus.String() byte-for-byte, and Health shall omit its details field when serialized to JSON if no details are present, matching go-DDS's `json:\"details,omitempty\"` behaviour for an empty string.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-MON-002",
+      "title": "HealthProvider trait — object safety and concurrency",
+      "text": "The system shall provide a HealthProvider trait declaring health(&self) -> Health, matching go-DDS's dds.HealthProvider interface (Health() Health); the trait shall be object-safe (usable as Box<dyn HealthProvider> and Arc<dyn HealthProvider>) and Send + Sync, so a single provider instance may be shared across concurrent tokio tasks without the caller adding external synchronization.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-MON-003",
+      "title": "HealthProvider wiring on every concrete Participant implementation",
+      "text": "MockParticipant, ShmemParticipant, and RtpsUdpParticipant shall each implement HealthProvider, returning Health{status: Down, details: Some(\"{\\\"state\\\":\\\"closed\\\"}\")} once the participant has been closed and Health{status: Ok, details: None} otherwise, matching go-DDS's mock.participant.Health, shmem.participant.Health, and rtps.participant.Health closed-state shape and details string byte-for-byte.",
+      "category": "functional",
+      "criticality": "medium"
     }
   ]
 }

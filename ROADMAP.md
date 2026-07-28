@@ -1239,7 +1239,66 @@ harder to change.
 
 ### Planned — v0.6 — Observability (Tier 5)
 
-- [ ] `HealthProvider` trait
+- [x] `HealthProvider` trait — landed as `src/observability/{mod,health}.rs`,
+  this milestone's first Tier 5 module, mirroring this crate's established
+  `src/security/` file-per-concern module-tree convention inside the
+  existing single `rust_dds` crate (the `dds-observability` Cargo
+  workspace cutover proposed for Tier 5 remains gated on RELAY#59, though
+  — unlike Tiers 1–4 — Tier 5's own module names are explicitly left
+  unconstrained by that issue, so there is no naming-ratification blocker
+  here at all). Direct port of go-DDS's *root*-package `dds.HealthProvider`
+  interface and its `dds.Health`/`dds.HealthStatus` types
+  (`github.com/SoundMatt/go-DDS`, `dds.go`) — not any single
+  `observability/*` subpackage, since go-DDS defines this as a small
+  optional interface any `dds.Participant` implementation may satisfy,
+  consumed by `observability/monitor`'s `GET /health` handler via a Go
+  interface type-assertion (`if hp, ok := p.(dds.HealthProvider); ok`).
+  `HealthStatus` is a three-variant enum (`Ok`/`Degraded`/`Down`,
+  defaulting to `Ok`) whose `Display` and `serde` forms both render
+  go-DDS's exact lowercase strings (`"ok"`/`"degraded"`/`"down"`); `Health`
+  pairs a `HealthStatus` with an `Option<String>` details field
+  (`#[serde(skip_serializing_if = "Option::is_none")]` reproducing
+  go-DDS's `json:"details,omitempty"`); `HealthProvider` itself is
+  `health(&self) -> Health`, object-safe (`Box<dyn HealthProvider>`/`Arc<dyn
+  HealthProvider>`) and `Send + Sync`, matching this crate's established
+  `security::SecurityPlugin` shape rather than inventing new API shape —
+  Rust trait objects do not support Go's runtime interface-discovery
+  pattern, so this is a plain optional trait each participant opts into
+  rather than a downcast-based mechanism. Implemented on every concrete,
+  public `Participant` type this crate has today —
+  `mock::MockParticipant`, `shmem::ShmemParticipant`, and
+  `rtps::dds_participant::RtpsUdpParticipant` — each returning
+  `Health{status: Down, details: Some(r#"{"state":"closed"}"#)}` once
+  closed and `Health{status: Ok, details: None}` otherwise, matching
+  go-DDS's `mock.participant.Health`/`shmem.participant.Health`/
+  `rtps.participant.Health` closed-state shape and details string
+  byte-for-byte. One documented, deliberate scope narrowing versus
+  go-DDS's `rtps.participant.Health`: that implementation additionally
+  reports live writer/reader counts (`{"writers":N,"readers":N}`) in the
+  non-closed case by locking its own `sync.Mutex`-guarded maps
+  synchronously; this port's equivalent state
+  (`rtps::participant::RtpsParticipant`'s `writers`/`readers`) is behind
+  `tokio::sync::RwLock`, so surfacing that live count from this
+  synchronous, non-`async` trait method would require blocking lock
+  acquisition — left for a later item (e.g. alongside this milestone's
+  next checklist item, `MetricsProvider`) rather than added here. Wiring
+  `HealthProvider` into an HTTP/admin surface analogous to go-DDS's
+  `observability/monitor` (`GET /health`) is likewise out of scope — no
+  such surface exists in this crate yet — and is left for a future item
+  under this milestone or "Planned — v0.9 — Enterprise"'s "HTTP admin
+  API". Adds REQ-MON-001/002/003 (a new block; this crate had no prior
+  `REQ-MON-*` requirements) with full `fusa:req`/`fusa:test`
+  traceability. Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001); no `.unwrap()`
+  on any user-visible (non-test) path (REQ-ASIL-003). Unit-tested per
+  this crate's established per-module convention: `HealthStatus`
+  default/`Display`/`serde` output, `Health`'s `omitempty`-equivalent
+  serialization and round-trip, `Health::ok`/`degraded`/`down`
+  constructors, `Box<dyn HealthProvider>`/`Arc<dyn HealthProvider>`
+  object-safety, and a multi-task `tokio::spawn` concurrency test — plus,
+  at each participant's own wiring layer, a closed-state test asserting
+  `Ok`/no-details before `close()` and `Down`/`{"state":"closed"}` after,
+  for `MockParticipant`, `ShmemParticipant`, and `RtpsUdpParticipant`
+  each.
 - [ ] `MetricsProvider` trait (per-topic write/deliver/drop counters)
 - [ ] `Drainer` / close-with-drain
 - [ ] Structured logging via `tracing` crate
