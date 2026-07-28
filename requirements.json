@@ -1537,6 +1537,20 @@
       "text": "ReplayGuard::check shall prune, on every call, all recorded entries whose timestamp is more than window before the call's ts, allowing a previously-seen sequence number to be accepted again once it falls outside the window; ReplayGuard::purge shall perform the same pruning against the current time on demand; ReplayGuard::len shall report the number of currently-tracked entries; and ReplayGuard shall be Send + Sync and safe for concurrent use from multiple tokio tasks without the caller adding external synchronization, matching go-DDS's ReplayGuard.Purge/Len and its documented safe-for-concurrent-use contract.",
       "category": "cybersecurity",
       "criticality": "critical"
+    },
+    {
+      "id": "REQ-SEC-028",
+      "title": "HMAC-SHA-256 SPDP discovery authentication — signing",
+      "text": "The system shall provide a DiscoveryPlugin trait and an HmacDiscoveryPlugin implementation whose sign_discovery(guid_prefix) returns a 32-byte HMAC-SHA-256 tag computed over a fixed context string followed by guid_prefix, matching go-DDS's HMACDiscoveryPlugin.SignDiscovery (security/discovery.go) byte-for-byte; when an SpdpConfig::discovery_plugin is configured, build_participant_data shall embed that tag in outbound SPDP announcements as a PID_DISCOVERY_TOKEN PL_CDR_LE parameter, matching go-DDS's spdpService.buildParticipantData wiring, and shall omit it entirely when no plugin is configured.",
+      "category": "cybersecurity",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-SEC-029",
+      "title": "HMAC-SHA-256 SPDP discovery authentication — verification and rejection",
+      "text": "HmacDiscoveryPlugin::verify_discovery shall return false for a nil/empty tag and otherwise recompute and compare the expected tag in constant time, returning true only for a tag produced by sign_discovery under the same key and guid_prefix; when SpdpService's configured discovery_plugin rejects a received announcement's PID_DISCOVERY_TOKEN (or the token is absent) against the sending participant's GuidPrefix, handle_packet shall silently discard that announcement without storing it as a known peer or notifying SEDP, matching go-DDS's spdpService.handlePacket verification gate; this check shall never panic on malformed or missing token input.",
+      "category": "cybersecurity",
+      "criticality": "critical"
     }
   ]
 }

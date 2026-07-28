@@ -22,9 +22,12 @@
 //! reproduction command.
 //!
 //! Not in this sub-phase's scope (later Tier 1/2 work, per `ROADMAP.md`):
-//! SEDP peer notification (`onNewPeer`/`onPeerEvicted`), the
-//! `DiscoveryPlugin` authentication hook (`PID_DISCOVERY_TOKEN`), and the
-//! `livelinessCb` participant-liveliness callback.
+//! SEDP peer notification (`onNewPeer`/`onPeerEvicted` — landed separately,
+//! see [`SpdpService::set_peer_listener`]) and the `livelinessCb`
+//! participant-liveliness callback. The `DiscoveryPlugin` authentication
+//! hook (`PID_DISCOVERY_TOKEN`) deferred here landed later, as the v0.5
+//! Security milestone's own final checklist item — see this module's
+//! "Discovery authentication" section below.
 //!
 //! # Unicast peer discovery (the "+ unicast" half of SPDP)
 //!
@@ -76,6 +79,43 @@
 //! `mpsc::Receiver<RtpsDatagram>`, regardless of whether the datagrams on
 //! it arrived via a multicast-joined socket or a plain unicast one.
 //!
+//! # Discovery authentication (HMAC-SHA-256 SPDP signing)
+//!
+//! `ROADMAP.md`'s "Planned — v0.5 — Security (Tier 2)" milestone's sixth
+//! and final checklist item, "HMAC-SHA-256 discovery authentication": an
+//! optional [`SpdpConfig::discovery_plugin`]
+//! (`Arc<dyn `[`crate::security::discovery::DiscoveryPlugin`]`>`, the
+//! module docs' `HmacDiscoveryPlugin` in practice) signs every outbound
+//! announcement and verifies every inbound one, mirroring go-DDS's
+//! `discoveryPlugin` field (`rtps/participant.go`) threaded into
+//! `spdpService.buildParticipantData`/`handlePacket` (`rtps/spdp.go`).
+//!
+//! [`build_participant_data`] appends the signature as a new `PL_CDR_LE`
+//! parameter, `PID_DISCOVERY_TOKEN` (already reserved in
+//! [`super::cdr::PID_DISCOVERY_TOKEN`] ahead of this item landing), keyed
+//! over this participant's own `guid_prefix` — matching go-DDS's
+//! `enc.addParam(pidDiscoveryToken, p.discoveryPlugin.SignDiscovery(p.guidPrefix[:]))`,
+//! appended in the same position (after the lease duration, immediately
+//! before the sentinel). [`SpdpService::handle_packet`] mirrors go-DDS's
+//! receive-side check exactly: [`extract_discovery_token`] scans the
+//! decoded payload for `PID_DISCOVERY_TOKEN` (matching go-DDS's
+//! `extractDiscoveryToken`, returning `None`/`nil` if absent — never a
+//! decode error), and a peer whose token does not verify against the
+//! *sender's* `GuidPrefix` (from the RTPS message [`Header`], the same
+//! field [`parse_participant_data`] itself trusts) is silently discarded:
+//! [`SpdpService::store_peer`] is never called for it, so it never becomes
+//! a known peer and SEDP is never notified — indistinguishable from a
+//! datagram that never arrived, matching go-DDS's own `return nil` at this
+//! point in `handlePacket`.
+//!
+//! When [`SpdpConfig::discovery_plugin`] is unset (`None`, the default —
+//! [`SpdpConfig::new`] does not set one), behaviour is unchanged from
+//! every earlier sub-phase: no token is emitted, and every inbound
+//! announcement is accepted regardless of its token, matching go-DDS's own
+//! `if p.discoveryPlugin != nil { ... }`/`if s.p.discoveryPlugin != nil { ... }`
+//! guards (nil plugin ⇒ unauthenticated discovery, the pre-existing
+//! default on both sides of the port).
+//!
 //! # Async model
 //!
 //! Consistent with `transport.rs` (sub-phase 3) and the crate-wide tokio
@@ -117,8 +157,8 @@ use tokio::task::JoinHandle;
 
 use super::cdr::{
     PlCdrDecoder, PlCdrEncoder, PID_BUILTIN_ENDPOINT_SET, PID_DEFAULT_UNICAST_LOCATOR,
-    PID_METATRAFFIC_UNICAST_LOCATOR, PID_PARTICIPANT_GUID, PID_PARTICIPANT_LEASE_DURATION,
-    PID_PROTOCOL_VERSION, PID_VENDOR_ID,
+    PID_DISCOVERY_TOKEN, PID_METATRAFFIC_UNICAST_LOCATOR, PID_PARTICIPANT_GUID,
+    PID_PARTICIPANT_LEASE_DURATION, PID_PROTOCOL_VERSION, PID_VENDOR_ID,
 };
 use super::guid::{
     Guid, GuidPrefix, ENDPOINT_SEDP_PUB_ANNOUNCER, ENDPOINT_SEDP_PUB_DETECTOR,
@@ -133,6 +173,7 @@ use super::message::{
 use super::transport::{
     meta_multicast_port, RtpsDatagram, RtpsSocket, SPDP_MULTICAST_ADDR, SPDP_MULTICAST_ADDR_V6,
 };
+use crate::security::discovery::DiscoveryPlugin;
 
 /// Fallback lease duration applied to a peer whose announcement did not
 /// carry a (non-zero) `PID_PARTICIPANT_LEASE_DURATION`. Matches go-DDS's
@@ -179,8 +220,19 @@ const ALL_BUILTIN_ENDPOINTS: u32 = ENDPOINT_SPDP_ANNOUNCER
 /// Not [`Copy`] (unlike earlier sub-phases' fixed-size configs) because
 /// [`SpdpConfig::peer_locators`] is a growable list; use `.clone()` where an
 /// implicit copy previously sufficed.
+///
+/// `Debug`/`PartialEq`/`Eq` are implemented by hand (below) rather than
+/// derived, because [`SpdpConfig::discovery_plugin`]'s `Arc<dyn
+/// DiscoveryPlugin>` cannot derive any of the three: the trait object has
+/// no `Debug` bound and no structural equality. The hand-written impls
+/// compare/print every other field exactly as `derive` would;
+/// `discovery_plugin` prints as `Some`/`None` only (not its contents) and
+/// compares via `Arc::ptr_eq` when both sides are `Some` — two configs are
+/// equal only if they share the *same* plugin instance (or both have
+/// none), matching `Arc<T>`'s own usual `ptr_eq`-based identity notion
+/// where `T` isn't itself comparable.
 //fusa:req REQ-RTPS-025
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SpdpConfig {
     /// Domain ID, used to compute the SPDP multicast port (RTPS 2.3
     /// §9.6.1).
@@ -237,7 +289,59 @@ pub struct SpdpConfig {
     /// method's docs for why this is a switch, not a dual-stack add-on.
     //fusa:req REQ-RTPS-025
     pub ipv6: bool,
+    /// Signs outbound SPDP announcements and verifies inbound ones — see
+    /// the module docs' "Discovery authentication" section. `None` by
+    /// default (set via [`SpdpConfig::new`]): unauthenticated discovery,
+    /// unchanged from every earlier sub-phase. Set via
+    /// [`SpdpConfig::with_discovery_plugin`]. Mirrors go-DDS's
+    /// `discoveryPlugin` field (`rtps/participant.go`), which lives on
+    /// `*participant` rather than a value-config struct — this crate's
+    /// `SpdpConfig` already fills that "everything one `SpdpService`
+    /// needs" role for every other per-participant SPDP setting, so this
+    /// one field joins it rather than introducing a second config type.
+    //fusa:req REQ-SEC-028
+    pub discovery_plugin: Option<Arc<dyn DiscoveryPlugin>>,
 }
+
+impl std::fmt::Debug for SpdpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpdpConfig")
+            .field("domain", &self.domain)
+            .field("guid_prefix", &self.guid_prefix)
+            .field("vendor_id", &self.vendor_id)
+            .field("meta_unicast_port", &self.meta_unicast_port)
+            .field("data_unicast_port", &self.data_unicast_port)
+            .field("announce_period", &self.announce_period)
+            .field("jitter", &self.jitter)
+            .field("peer_locators", &self.peer_locators)
+            .field("no_multicast", &self.no_multicast)
+            .field("ipv6", &self.ipv6)
+            .field("discovery_plugin", &self.discovery_plugin.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for SpdpConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.domain == other.domain
+            && self.guid_prefix == other.guid_prefix
+            && self.vendor_id == other.vendor_id
+            && self.meta_unicast_port == other.meta_unicast_port
+            && self.data_unicast_port == other.data_unicast_port
+            && self.announce_period == other.announce_period
+            && self.jitter == other.jitter
+            && self.peer_locators == other.peer_locators
+            && self.no_multicast == other.no_multicast
+            && self.ipv6 == other.ipv6
+            && match (&self.discovery_plugin, &other.discovery_plugin) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for SpdpConfig {}
 
 impl SpdpConfig {
     /// Builds a config with this crate's own vendor ID, the default
@@ -260,6 +364,7 @@ impl SpdpConfig {
             peer_locators: Vec::new(),
             no_multicast: false,
             ipv6: false,
+            discovery_plugin: None,
         }
     }
 
@@ -298,6 +403,19 @@ impl SpdpConfig {
     //fusa:req REQ-RTPS-025
     pub fn with_ipv6(mut self) -> Self {
         self.ipv6 = true;
+        self
+    }
+
+    /// Sets the [`DiscoveryPlugin`] this participant signs outbound SPDP
+    /// announcements with and verifies inbound ones against (builder
+    /// style) — see [`SpdpConfig::discovery_plugin`] and the module docs'
+    /// "Discovery authentication" section. `None` (unauthenticated
+    /// discovery) by default. A later call replaces an earlier one, rather
+    /// than composing multiple plugins — matches every other single-value
+    /// `SpdpConfig` builder method in this `impl` block.
+    //fusa:req REQ-SEC-028
+    pub fn with_discovery_plugin(mut self, plugin: Arc<dyn DiscoveryPlugin>) -> Self {
+        self.discovery_plugin = Some(plugin);
         self
     }
 }
@@ -343,7 +461,15 @@ pub struct ParticipantProxy {
 /// which of its own interfaces a given peer will see it from; receivers
 /// fill in the real address from the announcement's UDP source address
 /// (see [`parse_participant_data`]).
+///
+/// When `cfg.discovery_plugin` is set, one further parameter is appended
+/// after the lease duration and before the sentinel: `PID_DISCOVERY_TOKEN`,
+/// the plugin's `sign_discovery(&cfg.guid_prefix.0)` output — see the
+/// module docs' "Discovery authentication" section. Omitted entirely when
+/// `cfg.discovery_plugin` is `None` (the default), leaving every earlier
+/// sub-phase's byte-exact output unchanged.
 //fusa:req REQ-RTPS-025
+//fusa:req REQ-SEC-028
 pub fn build_participant_data(cfg: &SpdpConfig) -> Vec<u8> {
     let mut enc = PlCdrEncoder::new();
 
@@ -375,7 +501,30 @@ pub fn build_participant_data(cfg: &SpdpConfig) -> Vec<u8> {
     lease.extend_from_slice(&0u32.to_le_bytes());
     enc.add_bytes(PID_PARTICIPANT_LEASE_DURATION, &lease);
 
+    if let Some(plugin) = &cfg.discovery_plugin {
+        let tag = plugin.sign_discovery(&cfg.guid_prefix.0);
+        enc.add_bytes(PID_DISCOVERY_TOKEN, &tag);
+    }
+
     enc.finish()
+}
+
+/// Scans a decoded `PL_CDR_LE` `payload` for `PID_DISCOVERY_TOKEN` and
+/// returns a copy of its value, or `None` if the PID is absent — matches
+/// go-DDS's `extractDiscoveryToken` (`rtps/spdp.go`). Returns `None` (never
+/// an error) if `payload` does not even parse as a valid `PL_CDR_LE`
+/// encapsulation, the same tolerant-decode posture as
+/// [`parse_participant_data`]; never panics (REQ-RTPS-009).
+//fusa:req REQ-SEC-028
+//fusa:req REQ-RTPS-009
+pub fn extract_discovery_token(payload: &[u8]) -> Option<Vec<u8>> {
+    let decoder = PlCdrDecoder::new(payload).ok()?;
+    for param in decoder {
+        if param.pid == PID_DISCOVERY_TOKEN {
+            return Some(param.value.to_vec());
+        }
+    }
+    None
 }
 
 /// Builds a zero-address `Locator` of the family selected by `ipv6` at
@@ -745,9 +894,20 @@ impl SpdpService {
     /// Matches go-DDS's `handlePacket`. Malformed input, non-DATA
     /// submessages, and DATA submessages not from the SPDP writer entity
     /// are silently ignored — never panics (REQ-RTPS-009).
+    ///
+    /// When `self.config.discovery_plugin` is set, a well-formed
+    /// announcement is additionally required to carry a
+    /// `PID_DISCOVERY_TOKEN` that verifies against the *sender's*
+    /// `GuidPrefix` (the RTPS message header's, not any
+    /// `PID_PARTICIPANT_GUID` the payload itself claims — matching
+    /// go-DDS's `s.p.discoveryPlugin.VerifyDiscovery(hdr.GuidPrefix[:], token)`);
+    /// one that does not is discarded exactly like malformed input — never
+    /// stored, never notified to SEDP — see the module docs' "Discovery
+    /// authentication" section.
     //fusa:req REQ-RTPS-026
     //fusa:req REQ-RTPS-028
     //fusa:req REQ-RTPS-009
+    //fusa:req REQ-SEC-029
     async fn handle_packet(&self, data: &[u8], from: SocketAddr) {
         let Ok(header) = Header::decode(data) else {
             return;
@@ -773,6 +933,17 @@ impl SpdpService {
             let Some(payload) = ds.payload else {
                 continue;
             };
+            // Verify the discovery authentication token when a plugin is
+            // configured — matches go-DDS's own guard; an absent or
+            // wrongly-signed token is silently discarded, never treated as
+            // an unauthenticated pass. See the module docs' "Discovery
+            // authentication" section.
+            if let Some(plugin) = &self.config.discovery_plugin {
+                let token = extract_discovery_token(&payload).unwrap_or_default();
+                if !plugin.verify_discovery(&header.guid_prefix.0, &token) {
+                    continue;
+                }
+            }
             if let Some(proxy) = parse_participant_data(header.guid_prefix, &payload, from) {
                 self.store_peer(proxy).await;
             }
@@ -949,6 +1120,7 @@ mod tests {
             peer_locators: Vec::new(),
             no_multicast: false,
             ipv6: false,
+            discovery_plugin: None,
         }
     }
 
@@ -1338,6 +1510,239 @@ mod tests {
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].guid.prefix, peer_prefix);
         assert_eq!(peers[0].metatraffic_unicast.port, 27410);
+    }
+
+    // ── Discovery authentication (HMAC-SHA-256 SPDP signing) ─────────────
+
+    use crate::security::discovery::HmacDiscoveryPlugin;
+
+    //fusa:test REQ-SEC-028
+    #[test]
+    fn build_participant_data_omits_discovery_token_by_default() {
+        // Baseline, unchanged from every earlier sub-phase: no plugin
+        // configured ⇒ no PID_DISCOVERY_TOKEN in the output at all.
+        let payload = build_participant_data(&reference_config());
+        assert_eq!(extract_discovery_token(&payload), None);
+    }
+
+    //fusa:test REQ-SEC-028
+    #[test]
+    fn build_participant_data_embeds_discovery_token_when_plugin_configured() {
+        let plugin: Arc<dyn DiscoveryPlugin> =
+            Arc::new(HmacDiscoveryPlugin::new(b"spdp-signing-key".to_vec()));
+        let cfg = reference_config().with_discovery_plugin(Arc::clone(&plugin));
+
+        let payload = build_participant_data(&cfg);
+        let token = extract_discovery_token(&payload).expect("token must be present");
+        let expected = plugin.sign_discovery(&cfg.guid_prefix.0);
+        assert_eq!(token, expected);
+        assert_eq!(token.len(), 32);
+
+        // Every other field this crate's own byte-exact reference test
+        // (build_participant_data_matches_go_dds_reference) already pins
+        // is untouched — the token is strictly additive.
+        let baseline = build_participant_data(&reference_config());
+        assert_eq!(payload.len(), baseline.len() + 4 + 32); // (pid, len) header + 32-byte tag
+        assert!(payload.starts_with(&baseline[..baseline.len() - 4])); // everything but the old sentinel
+    }
+
+    //fusa:test REQ-SEC-028
+    #[test]
+    fn extract_discovery_token_returns_none_for_malformed_or_absent() {
+        // Too short to even carry a PL_CDR_LE encapsulation header.
+        assert_eq!(extract_discovery_token(&[0x00, 0x01]), None);
+        // Well-formed PL_CDR_LE payload, but no PID_DISCOVERY_TOKEN param.
+        let payload = build_participant_data(&reference_config());
+        assert_eq!(extract_discovery_token(&payload), None);
+    }
+
+    /// Full announce-send / receive-verify round trip: a peer signed with
+    /// the *same* key as the receiver's configured plugin is accepted and
+    /// stored, exactly as an unauthenticated peer would be without this
+    /// feature.
+    //fusa:test REQ-SEC-028
+    //fusa:test REQ-SEC-029
+    #[tokio::test]
+    async fn handle_packet_accepts_peer_with_valid_discovery_token() {
+        let send_socket = bound_socket().await;
+        let shared_key = b"shared-spdp-discovery-key".to_vec();
+        let own_plugin: Arc<dyn DiscoveryPlugin> =
+            Arc::new(HmacDiscoveryPlugin::new(shared_key.clone()));
+        let own_cfg =
+            SpdpConfig::new(0, ascending_prefix(), 17410, 17411).with_discovery_plugin(own_plugin);
+        let service = SpdpService::new(own_cfg, send_socket);
+
+        let mut peer_prefix = ascending_prefix();
+        peer_prefix.0[0] = 0xFF;
+        let peer_plugin: Arc<dyn DiscoveryPlugin> = Arc::new(HmacDiscoveryPlugin::new(shared_key));
+        let peer_cfg =
+            SpdpConfig::new(0, peer_prefix, 27410, 27411).with_discovery_plugin(peer_plugin);
+        let payload = build_participant_data(&peer_cfg);
+        let submsg = encode_data_submessage(
+            ENTITYID_SPDP_WRITER,
+            ENTITYID_SPDP_READER,
+            SequenceNumber { high: 0, low: 1 },
+            &payload,
+        );
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: peer_cfg.vendor_id,
+            guid_prefix: peer_prefix,
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+
+        service
+            .handle_packet(&msg, SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 12345)))
+            .await;
+
+        let peers = service.known_peers().await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].guid.prefix, peer_prefix);
+    }
+
+    /// A peer whose announcement carries no `PID_DISCOVERY_TOKEN` at all
+    /// (unsigned) is rejected by a receiver that has a plugin configured —
+    /// matches go-DDS's `VerifyDiscovery` contract of treating a nil/empty
+    /// tag as invalid, not as an unauthenticated pass-through.
+    //fusa:test REQ-SEC-029
+    #[tokio::test]
+    async fn handle_packet_rejects_peer_with_no_discovery_token() {
+        let send_socket = bound_socket().await;
+        let own_plugin: Arc<dyn DiscoveryPlugin> =
+            Arc::new(HmacDiscoveryPlugin::new(b"receiver-key".to_vec()));
+        let own_cfg =
+            SpdpConfig::new(0, ascending_prefix(), 17410, 17411).with_discovery_plugin(own_plugin);
+        let service = SpdpService::new(own_cfg, send_socket);
+
+        let mut peer_prefix = ascending_prefix();
+        peer_prefix.0[0] = 0xFF;
+        // Unsigned peer — no discovery_plugin configured on its own config.
+        let peer_cfg = SpdpConfig::new(0, peer_prefix, 27410, 27411);
+        let payload = build_participant_data(&peer_cfg);
+        let submsg = encode_data_submessage(
+            ENTITYID_SPDP_WRITER,
+            ENTITYID_SPDP_READER,
+            SequenceNumber { high: 0, low: 1 },
+            &payload,
+        );
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: peer_cfg.vendor_id,
+            guid_prefix: peer_prefix,
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+
+        service
+            .handle_packet(&msg, SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 12345)))
+            .await;
+
+        assert_eq!(service.known_peers().await.len(), 0);
+    }
+
+    /// A peer signed under a *different* key than the receiver's is
+    /// rejected — the forged/mismatched-key case this whole feature exists
+    /// to catch.
+    //fusa:test REQ-SEC-029
+    #[tokio::test]
+    async fn handle_packet_rejects_peer_with_wrong_key_discovery_token() {
+        let send_socket = bound_socket().await;
+        let own_plugin: Arc<dyn DiscoveryPlugin> =
+            Arc::new(HmacDiscoveryPlugin::new(b"receiver-key".to_vec()));
+        let own_cfg =
+            SpdpConfig::new(0, ascending_prefix(), 17410, 17411).with_discovery_plugin(own_plugin);
+        let service = SpdpService::new(own_cfg, send_socket);
+
+        let mut peer_prefix = ascending_prefix();
+        peer_prefix.0[0] = 0xFF;
+        let wrong_key_plugin: Arc<dyn DiscoveryPlugin> =
+            Arc::new(HmacDiscoveryPlugin::new(b"attacker-key".to_vec()));
+        let peer_cfg =
+            SpdpConfig::new(0, peer_prefix, 27410, 27411).with_discovery_plugin(wrong_key_plugin);
+        let payload = build_participant_data(&peer_cfg);
+        let submsg = encode_data_submessage(
+            ENTITYID_SPDP_WRITER,
+            ENTITYID_SPDP_READER,
+            SequenceNumber { high: 0, low: 1 },
+            &payload,
+        );
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: peer_cfg.vendor_id,
+            guid_prefix: peer_prefix,
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+
+        service
+            .handle_packet(&msg, SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 12345)))
+            .await;
+
+        assert_eq!(service.known_peers().await.len(), 0);
+    }
+
+    /// A tampered token (single bit flip in transit) is rejected — the
+    /// on-the-wire-tampering case, distinct from a wrong-key mismatch
+    /// above.
+    //fusa:test REQ-SEC-029
+    #[tokio::test]
+    async fn handle_packet_rejects_peer_with_tampered_discovery_token() {
+        let send_socket = bound_socket().await;
+        let shared_key = b"shared-spdp-discovery-key".to_vec();
+        let own_plugin: Arc<dyn DiscoveryPlugin> =
+            Arc::new(HmacDiscoveryPlugin::new(shared_key.clone()));
+        let own_cfg =
+            SpdpConfig::new(0, ascending_prefix(), 17410, 17411).with_discovery_plugin(own_plugin);
+        let service = SpdpService::new(own_cfg, send_socket);
+
+        let mut peer_prefix = ascending_prefix();
+        peer_prefix.0[0] = 0xFF;
+        let peer_plugin: Arc<dyn DiscoveryPlugin> = Arc::new(HmacDiscoveryPlugin::new(shared_key));
+        let peer_cfg =
+            SpdpConfig::new(0, peer_prefix, 27410, 27411).with_discovery_plugin(peer_plugin);
+        let mut payload = build_participant_data(&peer_cfg);
+        // The 32-byte token occupies the 32 bytes immediately before the
+        // trailing 4-byte PID_SENTINEL — flip its last byte, not the
+        // sentinel's own (which would corrupt parsing instead of just the
+        // signature).
+        let tag_last_byte = payload.len() - 4 - 1;
+        payload[tag_last_byte] ^= 0xFF;
+
+        let submsg = encode_data_submessage(
+            ENTITYID_SPDP_WRITER,
+            ENTITYID_SPDP_READER,
+            SequenceNumber { high: 0, low: 1 },
+            &payload,
+        );
+        let header = Header {
+            protocol_version: PROTOCOL_VERSION_2_3,
+            vendor_id: peer_cfg.vendor_id,
+            guid_prefix: peer_prefix,
+        };
+        let msg = wrap_in_rtps_message(header, &submsg);
+
+        service
+            .handle_packet(&msg, SocketAddr::from((Ipv4Addr::new(10, 0, 0, 5), 12345)))
+            .await;
+
+        assert_eq!(service.known_peers().await.len(), 0);
+    }
+
+    //fusa:test REQ-SEC-028
+    #[test]
+    fn spdp_config_equality_requires_matching_discovery_plugin_presence_and_identity() {
+        let cfg_none = reference_config();
+        assert_eq!(cfg_none, reference_config());
+
+        let plugin: Arc<dyn DiscoveryPlugin> = Arc::new(HmacDiscoveryPlugin::new(b"k".to_vec()));
+        let cfg_some = reference_config().with_discovery_plugin(Arc::clone(&plugin));
+        assert_ne!(cfg_none, cfg_some);
+
+        let cfg_some_same_plugin = reference_config().with_discovery_plugin(Arc::clone(&plugin));
+        assert_eq!(cfg_some, cfg_some_same_plugin);
+
+        let other_plugin: Arc<dyn DiscoveryPlugin> =
+            Arc::new(HmacDiscoveryPlugin::new(b"k".to_vec()));
+        let cfg_other_plugin = reference_config().with_discovery_plugin(other_plugin);
+        assert_ne!(cfg_some, cfg_other_plugin);
     }
 
     //fusa:test REQ-RTPS-026

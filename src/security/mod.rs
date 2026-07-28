@@ -51,22 +51,30 @@
 //!   transform, and wiring it into
 //!   `crate::rtps::participant::RtpsParticipant`'s receive path remains
 //!   deferred until a concrete caller need arises.
-//!
-//! Not yet landed (the one remaining v0.5 checklist item, its own future
-//! module mirroring go-DDS's corresponding file): HMAC-SHA-256 discovery
-//! authentication (go-DDS's `security/discovery.go` — per the parity
-//! build-out plan's Tier 2 section, this one plugs into SPDP and is
-//! therefore not fully decoupled from `crate::rtps`, unlike everything
-//! else in this module tree, which is transport-agnostic).
+//! - [`discovery`] — [`discovery::DiscoveryPlugin`] and
+//!   [`discovery::HmacDiscoveryPlugin`], HMAC-SHA-256 SPDP discovery
+//!   authentication. Direct port of go-DDS's `security.DiscoveryPlugin`
+//!   interface and `security.HMACDiscoveryPlugin`
+//!   (`security/discovery.go`). The v0.5 milestone's sixth and final
+//!   checklist item, "HMAC-SHA-256 discovery authentication". Unlike every
+//!   other type in this module tree, this one *is* wired in — per the
+//!   parity build-out plan's Tier 2 section, discovery authentication
+//!   plugs into SPDP and is therefore not fully decoupled from
+//!   `crate::rtps`:
+//!   [`crate::rtps::spdp::SpdpConfig::discovery_plugin`] holds an optional
+//!   `Arc<dyn discovery::DiscoveryPlugin>`, signing outbound SPDP
+//!   announcements and rejecting inbound ones that fail to verify.
 
 pub mod acl;
 pub mod aes_gcm;
+pub mod discovery;
 pub mod hmac;
 pub mod plugin;
 pub mod replay;
 
 pub use acl::{AccessPolicy, Permission, Rule};
 pub use aes_gcm::AesGcmPlugin;
+pub use discovery::{DiscoveryPlugin, HmacDiscoveryPlugin};
 pub use hmac::HmacPlugin;
 pub use plugin::{NullPlugin, SecurityError, SecurityPlugin};
 pub use replay::{ReplayError, ReplayGuard};
