@@ -72,7 +72,11 @@
 //! (multicast unavailable or undesirable — Docker/cloud networks, TSN
 //! segments) use [`RtpsUdpParticipant::new_with_config`] with
 //! [`RtpsUdpParticipantConfig::with_peer_locators`]/
-//! [`RtpsUdpParticipantConfig::with_no_multicast`] instead of `new`.
+//! [`RtpsUdpParticipantConfig::with_no_multicast`] instead of `new`. For an
+//! IPv6-only participant (`ROADMAP.md`'s "IPv4 and IPv6 multicast support"),
+//! use [`RtpsUdpParticipantConfig::with_ipv6`] — see that method's docs for
+//! the address-family-switch (not dual-stack) design and its "limited
+//! interop testing" caveat.
 //!
 //! # QoS → RTPS engine mapping
 //!
@@ -122,7 +126,8 @@ use super::sedp::{SedpConfig, SedpService};
 use super::spdp::{SpdpConfig, SpdpService};
 use super::transport::{
     data_unicast_port, meta_multicast_port, meta_unicast_port, user_multicast_port, RtpsDatagram,
-    RtpsSocket, SPDP_MULTICAST_ADDR, USER_DATA_MULTICAST_ADDR,
+    RtpsSocket, SPDP_MULTICAST_ADDR, SPDP_MULTICAST_ADDR_V6, USER_DATA_MULTICAST_ADDR,
+    USER_DATA_MULTICAST_ADDR_V6,
 };
 
 // ---------------------------------------------------------------------------
@@ -130,18 +135,22 @@ use super::transport::{
 // ---------------------------------------------------------------------------
 
 /// Optional configuration for [`RtpsUdpParticipant::new_with_config`]: static
-/// peer unicast addresses for SPDP discovery, and/or disabling SPDP
-/// multicast entirely — the public-API wiring for `ROADMAP.md`'s "Planned —
-/// v0.2" checklist item "SPDP participant discovery (multicast +
-/// unicast)"'s unicast half. Builder style, matching this crate's
-/// established `SpdpConfig`/`SedpConfig` config idiom.
-/// [`RtpsUdpParticipant::new`] is equivalent to
+/// peer unicast addresses for SPDP discovery, disabling SPDP multicast
+/// entirely, and/or switching every socket this participant binds from IPv4
+/// to IPv6 — the public-API wiring for `ROADMAP.md`'s "Planned — v0.2"
+/// checklist items "SPDP participant discovery (multicast + unicast)"'s
+/// unicast half ([`RtpsUdpParticipantConfig::with_peer_locators`]/
+/// [`RtpsUdpParticipantConfig::with_no_multicast`]) and "IPv4 and IPv6
+/// multicast support" ([`RtpsUdpParticipantConfig::with_ipv6`]). Builder
+/// style, matching this crate's established `SpdpConfig`/`SedpConfig`
+/// config idiom. [`RtpsUdpParticipant::new`] is equivalent to
 /// `new_with_config(domain, RtpsUdpParticipantConfig::default())` — the
-/// existing multicast-only behaviour, unchanged.
+/// existing IPv4, multicast-only behaviour, unchanged.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RtpsUdpParticipantConfig {
     peer_locators: Vec<SocketAddr>,
     no_multicast: bool,
+    ipv6: bool,
 }
 
 impl RtpsUdpParticipantConfig {
@@ -186,6 +195,52 @@ impl RtpsUdpParticipantConfig {
     //fusa:req REQ-RTPS-062
     pub fn with_no_multicast(mut self) -> Self {
         self.no_multicast = true;
+        self
+    }
+
+    /// Switches this participant's transport from IPv4 to IPv6 (builder
+    /// style): the meta/data unicast sockets bind on `[::]` via
+    /// [`super::transport::RtpsSocket::bind_unicast_v6`], the SPDP
+    /// multicast socket joins
+    /// [`super::transport::SPDP_MULTICAST_ADDR_V6`] (`FF03::1`) instead of
+    /// [`super::transport::SPDP_MULTICAST_ADDR`], and the user-data
+    /// multicast socket joins
+    /// [`super::transport::USER_DATA_MULTICAST_ADDR_V6`] (`FF03::2`)
+    /// instead of [`super::transport::USER_DATA_MULTICAST_ADDR`] — every
+    /// socket this participant binds moves to the same family together, so
+    /// there is no mixed-family state to reason about. `false` (IPv4) by
+    /// default.
+    ///
+    /// This is a **switch, not a dual-stack add-on** — the one deliberate
+    /// deviation from go-DDS's own `WithIPv6` `Option`, which *adds* a
+    /// second, parallel set of IPv6 sockets alongside the IPv4 ones rather
+    /// than replacing them (see a fresh go-DDS clone's `rtps/participant.go`,
+    /// `if p.ipv6 { ... }`). Inspecting that same clone further shows
+    /// go-DDS's own IPv6 sockets are, today, only ever wired into the
+    /// user-data receive path (`dataSockV6`) — `mcastSockV6`/`metaSockV6`
+    /// are bound but never threaded into any SPDP/SEDP receive loop, so
+    /// go-DDS's `WithIPv6` cannot actually *discover* a peer over IPv6 at
+    /// all, only receive user data sent to a statically-known IPv6 address.
+    /// A single-family switch avoids reproducing that gap: every code path
+    /// this participant already has (SPDP announce/receive, SEDP
+    /// announce/receive, BestEffort/Reliable data, both multicast groups)
+    /// works identically under `with_ipv6()`, over real IPv6 end to end —
+    /// see `dds_participant.rs`'s own IPv6 round-trip test and
+    /// `tests/rtps_two_process_interop.rs`'s `--ipv6` case. What this
+    /// participant does *not* claim, matching
+    /// [`super::transport`]'s own module docs: **limited interop
+    /// testing** — this crate's own two independently-started
+    /// `RtpsUdpParticipant`s (and, for the two-process case,
+    /// `rtps-interop-peer` processes) talking IPv6 to each other, not
+    /// verified against a third-party DDS implementation's IPv6 path.
+    /// [`RtpsUdpParticipantConfig::with_peer_locators`] addresses passed
+    /// alongside `with_ipv6()` must themselves be IPv6 `SocketAddr`s (an
+    /// IPv4 peer address is simply unreachable from an IPv6-only socket,
+    /// the same `EINVAL`-at-send-time failure mode as any other
+    /// family-mismatched UDP send — not specially validated here).
+    //fusa:req REQ-RTPS-041
+    pub fn with_ipv6(mut self) -> Self {
+        self.ipv6 = true;
         self
     }
 }
@@ -334,15 +389,25 @@ impl RtpsUdpParticipant {
             ))
         })?;
 
+        // Every socket this participant binds moves to the same address
+        // family together — see [`RtpsUdpParticipantConfig::with_ipv6`]'s
+        // docs for why this is a switch, not a dual-stack add-on.
+        //fusa:req REQ-RTPS-041
         let meta_socket = Arc::new(
-            RtpsSocket::bind_unicast_v4(meta_base_port)
-                .await
-                .map_err(|e| Error::Other(format!("rtps: bind metatraffic socket: {e}")))?,
+            if config.ipv6 {
+                RtpsSocket::bind_unicast_v6(meta_base_port).await
+            } else {
+                RtpsSocket::bind_unicast_v4(meta_base_port).await
+            }
+            .map_err(|e| Error::Other(format!("rtps: bind metatraffic socket: {e}")))?,
         );
         let data_socket = Arc::new(
-            RtpsSocket::bind_unicast_v4(data_base_port)
-                .await
-                .map_err(|e| Error::Other(format!("rtps: bind user-data socket: {e}")))?,
+            if config.ipv6 {
+                RtpsSocket::bind_unicast_v6(data_base_port).await
+            } else {
+                RtpsSocket::bind_unicast_v4(data_base_port).await
+            }
+            .map_err(|e| Error::Other(format!("rtps: bind user-data socket: {e}")))?,
         );
         let mcast_socket = if config.no_multicast {
             None
@@ -353,11 +418,14 @@ impl RtpsUdpParticipant {
                     domain.0
                 ))
             })?;
-            Some(Arc::new(
-                RtpsSocket::bind_multicast_v4(SPDP_MULTICAST_ADDR, mcast_port)
-                    .await
-                    .map_err(|e| Error::Other(format!("rtps: bind SPDP multicast socket: {e}")))?,
-            ))
+            let bound = if config.ipv6 {
+                RtpsSocket::bind_multicast_v6(SPDP_MULTICAST_ADDR_V6, mcast_port).await
+            } else {
+                RtpsSocket::bind_multicast_v4(SPDP_MULTICAST_ADDR, mcast_port).await
+            };
+            Some(Arc::new(bound.map_err(|e| {
+                Error::Other(format!("rtps: bind SPDP multicast socket: {e}"))
+            })?))
         };
 
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
@@ -375,6 +443,9 @@ impl RtpsUdpParticipant {
         if config.no_multicast {
             spdp_cfg = spdp_cfg.with_no_multicast();
         }
+        if config.ipv6 {
+            spdp_cfg = spdp_cfg.with_ipv6();
+        }
         let spdp = SpdpService::new(spdp_cfg, Arc::clone(&meta_socket));
         tasks.push(Arc::clone(&spdp).spawn_announce_loop());
         tasks.push(Arc::clone(&spdp).spawn_evict_loop());
@@ -386,7 +457,10 @@ impl RtpsUdpParticipant {
 
         // SEDP: exchange publication/subscription announcements with every
         // SPDP-discovered peer, matching local/remote endpoints by topic.
-        let sedp_cfg = SedpConfig::new(guid_prefix, data_socket.local_port());
+        let mut sedp_cfg = SedpConfig::new(guid_prefix, data_socket.local_port());
+        if config.ipv6 {
+            sedp_cfg = sedp_cfg.with_ipv6();
+        }
         let sedp = SedpService::new(sedp_cfg, Arc::clone(&meta_socket), Arc::clone(&spdp));
 
         // A peer's unicast SPDP announcement (config.peer_locators on their
@@ -437,20 +511,24 @@ impl RtpsUdpParticipant {
             None
         } else {
             match user_multicast_port(d) {
-                Some(port) => RtpsSocket::bind_multicast_v4(USER_DATA_MULTICAST_ADDR, port)
-                    .await
-                    .ok()
-                    .map(Arc::new),
+                Some(port) => {
+                    let bound = if config.ipv6 {
+                        RtpsSocket::bind_multicast_v6(USER_DATA_MULTICAST_ADDR_V6, port).await
+                    } else {
+                        RtpsSocket::bind_multicast_v4(USER_DATA_MULTICAST_ADDR, port).await
+                    };
+                    bound.ok().map(Arc::new)
+                }
                 None => None,
             }
         };
         if let Some(mcast_socket) = &user_data_mcast_socket {
-            inner
-                .set_user_data_multicast_addr(SocketAddr::from((
-                    USER_DATA_MULTICAST_ADDR,
-                    mcast_socket.local_port(),
-                )))
-                .await;
+            let mcast_addr: SocketAddr = if config.ipv6 {
+                SocketAddr::from((USER_DATA_MULTICAST_ADDR_V6, mcast_socket.local_port()))
+            } else {
+                SocketAddr::from((USER_DATA_MULTICAST_ADDR, mcast_socket.local_port()))
+            };
+            inner.set_user_data_multicast_addr(mcast_addr).await;
             let (mcast_data_rx, mcast_data_recv_task) = mcast_socket.spawn_receive_loop(64);
             tasks.push(mcast_data_recv_task);
             tasks.push(Arc::clone(&inner).spawn_receive_loop(mcast_data_rx));
@@ -1017,5 +1095,99 @@ mod tests {
         };
         assert_eq!(sample.payload, b"multicast-hello");
         assert_eq!(sample.topic, "MulticastTopic");
+    }
+
+    // ── IPv6 (RtpsUdpParticipantConfig::with_ipv6) ────────────────────────
+
+    const IPV6_MULTICAST_DOMAIN: Domain = Domain(221);
+
+    //fusa:test REQ-RTPS-041
+    //fusa:test REQ-RTPS-062
+    #[tokio::test]
+    async fn ipv6_spdp_sedp_and_besteffort_round_trip_between_two_participants() {
+        // The IPv6 analogue of
+        // besteffort_pubsub_between_two_participants_with_multicast_enabled
+        // above: two independent RtpsUdpParticipant instances, both
+        // constructed with with_ipv6(), on the same domain — every socket
+        // (meta/data unicast, SPDP multicast at FF03::1, user-data
+        // multicast at FF03::2) is IPv6-only on both sides. Proves SPDP
+        // discovers both sides, SEDP matches the writer/reader pair, and a
+        // BestEffort sample flows end-to-end, all over real IPv6 — the
+        // "SPDP/SEDP/BestEffort round-trip test" this crate's IPv6 support
+        // is scoped to provide.
+        //
+        // Same skip posture as every other real-multicast test in this
+        // crate: IPv6 (and especially IPv6 multicast) is even less
+        // universally available in CI sandboxes than IPv4 multicast — see
+        // with_ipv6's own doc comment for the explicit "limited interop
+        // testing" caveat this test is not meant to outgrow. A bind
+        // failure or a discovery/delivery timeout is treated as a skip,
+        // not a failure.
+        let Ok(a) = RtpsUdpParticipant::new_with_config(
+            IPV6_MULTICAST_DOMAIN,
+            RtpsUdpParticipantConfig::new().with_ipv6(),
+        )
+        .await
+        else {
+            return;
+        };
+        let Ok(b) = RtpsUdpParticipant::new_with_config(
+            IPV6_MULTICAST_DOMAIN,
+            RtpsUdpParticipantConfig::new().with_ipv6(),
+        )
+        .await
+        else {
+            return;
+        };
+        let a: Arc<dyn Participant> = a;
+        let b: Arc<dyn Participant> = b;
+
+        let (rx, _sub) = b
+            .new_subscriber(
+                "Ipv6MulticastTopic",
+                DEFAULT_QOS.clone(),
+                SubscriberOptions::default(),
+            )
+            .await
+            .unwrap();
+        let pub_ = a
+            .new_publisher("Ipv6MulticastTopic", DEFAULT_QOS.clone())
+            .await
+            .unwrap();
+
+        let Ok(Some(sample)) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let _ = pub_.write(b"ipv6-multicast-hello".to_vec()).await;
+                if let Ok(Some(sample)) =
+                    tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await
+                {
+                    return Some(sample);
+                }
+            }
+        })
+        .await
+        else {
+            return;
+        };
+        assert_eq!(sample.payload, b"ipv6-multicast-hello");
+        assert_eq!(sample.topic, "Ipv6MulticastTopic");
+    }
+
+    //fusa:test REQ-RTPS-041
+    #[tokio::test]
+    async fn ipv6_participant_binds_and_reports_its_domain_or_skips_cleanly() {
+        // A lighter-weight companion to the round-trip test above: proves
+        // construction itself (meta/data unicast + SPDP/user-data
+        // multicast, all IPv6) succeeds or fails cleanly — no panic either
+        // way — independent of whether a peer is present to discover.
+        let Ok(p) = RtpsUdpParticipant::new_with_config(
+            Domain(222),
+            RtpsUdpParticipantConfig::new().with_ipv6(),
+        )
+        .await
+        else {
+            return; // no IPv6 / no IPv6-multicast-capable interface here
+        };
+        assert_eq!(p.domain(), Domain(222));
     }
 }

@@ -173,6 +173,14 @@ pub struct SedpConfig {
     /// go-DDS's `buildEndpointData`'s `locatorFromUDP(&net.UDPAddr{IP:
     /// net.IPv4zero}, s.p.dataSock.port)`.
     pub data_unicast_port: u16,
+    /// When `true`, [`build_endpoint_data`] advertises a `LOCATOR_KIND_UDPV6`
+    /// zero-address locator instead of `LOCATOR_KIND_UDPV4` — the SEDP half
+    /// of the address-family switch behind
+    /// [`super::dds_participant::RtpsUdpParticipantConfig::with_ipv6`]
+    /// (mirrors [`super::spdp::SpdpConfig::ipv6`]). `false` by default — set
+    /// via [`SedpConfig::with_ipv6`].
+    //fusa:req REQ-RTPS-029
+    pub ipv6: bool,
 }
 
 impl SedpConfig {
@@ -183,7 +191,16 @@ impl SedpConfig {
             guid_prefix,
             vendor_id: VENDOR_ID_RUST_DDS,
             data_unicast_port,
+            ipv6: false,
         }
+    }
+
+    /// Switches this config's advertised locator kind from IPv4 to IPv6
+    /// (builder style) — see [`SedpConfig::ipv6`].
+    //fusa:req REQ-RTPS-029
+    pub fn with_ipv6(mut self) -> Self {
+        self.ipv6 = true;
+        self
     }
 }
 
@@ -212,19 +229,35 @@ pub fn build_endpoint_data(cfg: &SedpConfig, info: &EndpointInfo) -> Vec<u8> {
     enc.add_guid(PID_ENDPOINT_GUID, &info.guid);
     enc.add_string(PID_TOPIC_NAME, &info.topic_name);
     enc.add_string(PID_TYPE_NAME, ENDPOINT_TYPE_NAME);
-    let locator = Locator::udp_v4([0, 0, 0, 0], u32::from(cfg.data_unicast_port));
+    let locator = if cfg.ipv6 {
+        Locator::udp_v6([0u8; 16], u32::from(cfg.data_unicast_port))
+    } else {
+        Locator::udp_v4([0, 0, 0, 0], u32::from(cfg.data_unicast_port))
+    };
     enc.add_locator(PID_DEFAULT_UNICAST_LOCATOR, &locator);
     enc.finish()
 }
 
-/// If `loc`'s address is all-zero (`0.0.0.0`), fills in `from_v4`'s octets.
-/// Matches go-DDS's `handleEndpointAnnounce` fill-in — the same convention
-/// [`super::spdp::parse_participant_data`] applies for SPDP.
-fn fill_in_zero_address(loc: &mut Locator, from_v4: Option<std::net::Ipv4Addr>) {
-    if loc.address == [0u8; 16] {
-        if let Some(ip) = from_v4 {
-            loc.address[12..16].copy_from_slice(&ip.octets());
+/// If `loc`'s address is all-zero (`0.0.0.0`/`::`), fills in `from`'s
+/// octets, provided its family matches the locator's own `kind` — matches
+/// go-DDS's `handleEndpointAnnounce` fill-in for the IPv4 case (its only
+/// case; see [`SedpConfig::ipv6`]'s doc comment), extended to the IPv6 case
+/// by the same rule [`super::spdp::parse_participant_data`]'s own copy of
+/// this function applies for SPDP. A locator/sender family mismatch is left
+/// unfilled rather than guessed at — same rationale as SPDP's copy.
+//fusa:req REQ-RTPS-030
+fn fill_in_zero_address(loc: &mut Locator, from: SocketAddr) {
+    if loc.address != [0u8; 16] {
+        return;
+    }
+    match (loc.kind, from) {
+        (super::locator::LOCATOR_KIND_UDPV4, SocketAddr::V4(v4)) => {
+            loc.address[12..16].copy_from_slice(&v4.ip().octets());
         }
+        (super::locator::LOCATOR_KIND_UDPV6, SocketAddr::V6(v6)) => {
+            loc.address.copy_from_slice(&v6.ip().octets());
+        }
+        _ => {}
     }
 }
 
@@ -536,10 +569,6 @@ impl SedpService {
             is_writer,
         };
         let mut data_locator = Locator::default();
-        let from_v4 = match from {
-            SocketAddr::V4(v4) => Some(*v4.ip()),
-            SocketAddr::V6(_) => None,
-        };
 
         for param in decoder {
             match param.pid {
@@ -555,7 +584,7 @@ impl SedpService {
                 }
                 PID_DEFAULT_UNICAST_LOCATOR => {
                     if let Ok(mut loc) = Locator::decode(param.value) {
-                        fill_in_zero_address(&mut loc, from_v4);
+                        fill_in_zero_address(&mut loc, from);
                         data_locator = loc;
                     }
                 }
@@ -734,6 +763,7 @@ mod tests {
             guid_prefix: ascending_prefix(),
             vendor_id: VendorId([0x01, 0x27]), // go-DDS's own vendor id, for byte-exact parity
             data_unicast_port: 17411,
+            ipv6: false,
         }
     }
 
@@ -883,7 +913,7 @@ mod tests {
         let mut guid = None;
         let mut topic = None;
         let mut locator = Locator::default();
-        let from_v4 = Some(Ipv4Addr::new(10, 0, 0, 9));
+        let from = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 9), 12345));
         for param in decoder {
             match param.pid {
                 PID_ENDPOINT_GUID => guid = Some(Guid::decode(param.value).unwrap()),
@@ -892,7 +922,7 @@ mod tests {
                 }
                 PID_DEFAULT_UNICAST_LOCATOR => {
                     let mut loc = Locator::decode(param.value).unwrap();
-                    fill_in_zero_address(&mut loc, from_v4);
+                    fill_in_zero_address(&mut loc, from);
                     locator = loc;
                 }
                 _ => {}
@@ -918,8 +948,59 @@ mod tests {
     fn handle_endpoint_announce_keeps_nonzero_locator_address_unchanged() {
         let real_locator = Locator::udp_v4([192, 168, 1, 1], 7411);
         let mut loc = real_locator;
-        fill_in_zero_address(&mut loc, Some(Ipv4Addr::new(10, 0, 0, 9)));
+        fill_in_zero_address(
+            &mut loc,
+            SocketAddr::from((Ipv4Addr::new(10, 0, 0, 9), 12345)),
+        );
         assert_eq!(loc, real_locator);
+    }
+
+    // ── IPv6 (SedpConfig::ipv6 / RtpsUdpParticipantConfig::with_ipv6) ────
+    //
+    // Same "no go-DDS byte oracle, internal consistency only" rationale as
+    // spdp.rs's own IPv6 tests — see that module's tests for the full
+    // explanation (go-DDS's `sedpService.buildEndpointData` never emits an
+    // IPv6 locator either).
+
+    //fusa:test REQ-RTPS-029
+    #[test]
+    fn build_endpoint_data_emits_a_udpv6_locator_when_ipv6_is_set() {
+        let mut cfg = reference_config();
+        cfg.ipv6 = true;
+        let info = EndpointInfo {
+            guid: Guid {
+                prefix: ascending_prefix(),
+                entity: writer_eid(),
+            },
+            topic_name: "Square".to_string(),
+            is_writer: true,
+        };
+        let payload = build_endpoint_data(&cfg, &info);
+        let from = SocketAddr::from((std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 9), 12345));
+
+        let decoder = PlCdrDecoder::new(&payload).unwrap();
+        let mut locator = Locator::default();
+        for param in decoder {
+            if param.pid == PID_DEFAULT_UNICAST_LOCATOR {
+                let mut loc = Locator::decode(param.value).unwrap();
+                fill_in_zero_address(&mut loc, from);
+                locator = loc;
+            }
+        }
+        assert_eq!(locator.kind, super::super::locator::LOCATOR_KIND_UDPV6);
+        assert_eq!(locator.port, 17411);
+        assert_eq!(
+            locator.address,
+            std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 9).octets()
+        );
+    }
+
+    //fusa:test REQ-RTPS-029
+    #[test]
+    fn sedp_config_with_ipv6_builder_sets_the_flag() {
+        let cfg = SedpConfig::new(ascending_prefix(), 17411).with_ipv6();
+        assert!(cfg.ipv6);
+        assert!(!SedpConfig::new(ascending_prefix(), 17411).ipv6);
     }
 
     // ── Async service-level tests (real loopback sockets) ───────────────

@@ -130,7 +130,9 @@ use super::message::{
     decode_data_submessage, encode_data_submessage, wrap_in_rtps_message, Header, SequenceNumber,
     SubmessageIter, VendorId, PROTOCOL_VERSION_2_3, SUBMSG_DATA, VENDOR_ID_RUST_DDS,
 };
-use super::transport::{meta_multicast_port, RtpsDatagram, RtpsSocket, SPDP_MULTICAST_ADDR};
+use super::transport::{
+    meta_multicast_port, RtpsDatagram, RtpsSocket, SPDP_MULTICAST_ADDR, SPDP_MULTICAST_ADDR_V6,
+};
 
 /// Fallback lease duration applied to a peer whose announcement did not
 /// carry a (non-zero) `PID_PARTICIPANT_LEASE_DURATION`. Matches go-DDS's
@@ -225,6 +227,16 @@ pub struct SpdpConfig {
     /// shape — see the module docs' "Unicast peer discovery" section for
     /// the one behavioural deviation.
     pub no_multicast: bool,
+    /// When `true`, [`build_participant_data`] advertises `LOCATOR_KIND_UDPV6`
+    /// zero-address locators (instead of `LOCATOR_KIND_UDPV4`) and
+    /// [`SpdpService::send_announcement`] sends to
+    /// [`super::transport::SPDP_MULTICAST_ADDR_V6`] instead of
+    /// [`SPDP_MULTICAST_ADDR`] — the address-family switch behind
+    /// [`super::dds_participant::RtpsUdpParticipantConfig::with_ipv6`].
+    /// `false` by default — set via [`SpdpConfig::with_ipv6`]. See that
+    /// method's docs for why this is a switch, not a dual-stack add-on.
+    //fusa:req REQ-RTPS-025
+    pub ipv6: bool,
 }
 
 impl SpdpConfig {
@@ -247,6 +259,7 @@ impl SpdpConfig {
             jitter: Duration::ZERO,
             peer_locators: Vec::new(),
             no_multicast: false,
+            ipv6: false,
         }
     }
 
@@ -277,6 +290,14 @@ impl SpdpConfig {
     //fusa:req REQ-RTPS-059
     pub fn with_no_multicast(mut self) -> Self {
         self.no_multicast = true;
+        self
+    }
+
+    /// Switches this config's advertised locator kind and multicast
+    /// destination from IPv4 to IPv6 (builder style) — see [`SpdpConfig::ipv6`].
+    //fusa:req REQ-RTPS-025
+    pub fn with_ipv6(mut self) -> Self {
+        self.ipv6 = true;
         self
     }
 }
@@ -343,10 +364,10 @@ pub fn build_participant_data(cfg: &SpdpConfig) -> Vec<u8> {
 
     enc.add_u32(PID_BUILTIN_ENDPOINT_SET, ALL_BUILTIN_ENDPOINTS);
 
-    let meta_locator = Locator::udp_v4([0, 0, 0, 0], u32::from(cfg.meta_unicast_port));
+    let meta_locator = zero_locator(cfg.ipv6, cfg.meta_unicast_port);
     enc.add_locator(PID_METATRAFFIC_UNICAST_LOCATOR, &meta_locator);
 
-    let data_locator = Locator::udp_v4([0, 0, 0, 0], u32::from(cfg.data_unicast_port));
+    let data_locator = zero_locator(cfg.ipv6, cfg.data_unicast_port);
     enc.add_locator(PID_DEFAULT_UNICAST_LOCATOR, &data_locator);
 
     let mut lease = Vec::with_capacity(8);
@@ -357,6 +378,39 @@ pub fn build_participant_data(cfg: &SpdpConfig) -> Vec<u8> {
     enc.finish()
 }
 
+/// Builds a zero-address `Locator` of the family selected by `ipv6` at
+/// `port` — the [`build_participant_data`] zero-address-locator convention
+/// (see that function's doc comment; `sedp.rs`'s `build_endpoint_data` has
+/// its own copy of the same idea, matching the pre-existing
+/// `fill_in_zero_address` duplication between the two modules), extended to
+/// also select `LOCATOR_KIND_UDPV6` over `LOCATOR_KIND_UDPV4` when `ipv6` is
+/// set — the wire encoding itself is unchanged from what
+/// [`super::locator::Locator::udp_v4`]/`udp_v6` already verify
+/// byte-for-byte against go-DDS (see `locator.rs`'s own tests); only *which*
+/// of the two this function picks is new.
+//fusa:req REQ-RTPS-025
+fn zero_locator(ipv6: bool, port: u16) -> Locator {
+    if ipv6 {
+        Locator::udp_v6([0u8; 16], u32::from(port))
+    } else {
+        Locator::udp_v4([0, 0, 0, 0], u32::from(port))
+    }
+}
+
+/// The SPDP multicast destination address for [`SpdpService::send_announcement`]:
+/// [`SPDP_MULTICAST_ADDR_V6`] at `port` when `ipv6` is set, else
+/// [`SPDP_MULTICAST_ADDR`] — the same address-family switch as
+/// [`zero_locator`], pulled into its own pure function so it is testable
+/// without a real socket/domain (see this module's IPv6 tests).
+//fusa:req REQ-RTPS-017
+fn spdp_multicast_dst(ipv6: bool, port: u16) -> SocketAddr {
+    if ipv6 {
+        SocketAddr::from((SPDP_MULTICAST_ADDR_V6, port))
+    } else {
+        SocketAddr::from((SPDP_MULTICAST_ADDR, port))
+    }
+}
+
 /// Decodes a `PL_CDR_LE` ParticipantProxy `payload` (an SPDP DATA
 /// submessage's payload) into a [`ParticipantProxy`]. `prefix` is the
 /// sending participant's `GuidPrefix`, taken from the enclosing RTPS
@@ -365,9 +419,14 @@ pub fn build_participant_data(cfg: &SpdpConfig) -> Vec<u8> {
 /// `PID_PARTICIPANT_GUID` the same way go-DDS's `parseParticipantData`
 /// does — the payload's own value wins if present). `from` is the UDP
 /// datagram's sender address; when a decoded locator's address is all-zero
-/// (`0.0.0.0`, see [`build_participant_data`]'s doc comment), `from`'s IPv4
-/// address is filled in — matches go-DDS's `parseParticipantData` fill-in
-/// behaviour exactly.
+/// (`0.0.0.0`/`::`, see [`build_participant_data`]'s doc comment), `from`'s
+/// address is filled in, provided its family matches the locator's own
+/// `kind` (`LOCATOR_KIND_UDPV4` filled from a `SocketAddr::V4` sender,
+/// `LOCATOR_KIND_UDPV6` from a `SocketAddr::V6` one) — matches go-DDS's
+/// `parseParticipantData` fill-in behaviour exactly for the IPv4 case (its
+/// only case; go-DDS's own IPv4/IPv6 SPDP payloads are never mixed-family
+/// today; see [`SpdpConfig::ipv6`]'s doc comment), extended to the IPv6 case
+/// by the same rule.
 ///
 /// Returns `None` only if `payload` does not start with a valid `PL_CDR_LE`
 /// encapsulation header; a payload that parses but is missing individual
@@ -395,22 +454,17 @@ pub fn parse_participant_data(
         last_seen: None,
     };
 
-    let from_v4 = match from {
-        SocketAddr::V4(v4) => Some(*v4.ip()),
-        SocketAddr::V6(_) => None,
-    };
-
     for param in decoder {
         match param.pid {
             PID_METATRAFFIC_UNICAST_LOCATOR => {
                 if let Ok(mut loc) = Locator::decode(param.value) {
-                    fill_in_zero_address(&mut loc, from_v4);
+                    fill_in_zero_address(&mut loc, from);
                     proxy.metatraffic_unicast = loc;
                 }
             }
             PID_DEFAULT_UNICAST_LOCATOR => {
                 if let Ok(mut loc) = Locator::decode(param.value) {
-                    fill_in_zero_address(&mut loc, from_v4);
+                    fill_in_zero_address(&mut loc, from);
                     proxy.default_unicast = loc;
                 }
             }
@@ -449,14 +503,29 @@ pub fn parse_participant_data(
     Some(proxy)
 }
 
-/// If `loc`'s address is all-zero (`0.0.0.0`), fills in `from_v4`'s octets
-/// — matches go-DDS's `if proxy.metatrafficUnicast.Address == ([16]byte{})
-/// { ... }` fill-in.
-fn fill_in_zero_address(loc: &mut Locator, from_v4: Option<std::net::Ipv4Addr>) {
-    if loc.address == [0u8; 16] {
-        if let Some(ip) = from_v4 {
-            loc.address[12..16].copy_from_slice(&ip.octets());
+/// If `loc`'s address is all-zero (`0.0.0.0`/`::`), fills in `from`'s
+/// octets — matches go-DDS's `if proxy.metatrafficUnicast.Address ==
+/// ([16]byte{}) { ... }` fill-in for the IPv4 case (its only case; see
+/// [`SpdpConfig::ipv6`]'s doc comment), extended here to also fill an
+/// IPv6-kind locator from an IPv6 sender. A locator/sender family mismatch
+/// (e.g. a `LOCATOR_KIND_UDPV6` locator decoded from a datagram whose UDP
+/// source turned out to be IPv4, which should not happen in practice since
+/// a participant's own socket family determines both) is left unfilled
+/// rather than guessed at — matches [`Locator::udp_addr`]'s own
+/// never-guess convention for an unrecognised/mismatched case.
+//fusa:req REQ-RTPS-026
+fn fill_in_zero_address(loc: &mut Locator, from: SocketAddr) {
+    if loc.address != [0u8; 16] {
+        return;
+    }
+    match (loc.kind, from) {
+        (super::locator::LOCATOR_KIND_UDPV4, SocketAddr::V4(v4)) => {
+            loc.address[12..16].copy_from_slice(&v4.ip().octets());
         }
+        (super::locator::LOCATOR_KIND_UDPV6, SocketAddr::V6(v6)) => {
+            loc.address.copy_from_slice(&v6.ip().octets());
+        }
+        _ => {}
     }
 }
 
@@ -589,7 +658,7 @@ impl SpdpService {
         if !self.config.no_multicast {
             match meta_multicast_port(self.config.domain) {
                 Some(port) => {
-                    let dst = SocketAddr::from((SPDP_MULTICAST_ADDR, port));
+                    let dst = spdp_multicast_dst(self.config.ipv6, port);
                     if let Err(e) = self.send_socket.send_to(&msg, dst).await {
                         last_err = Some(e);
                     }
@@ -879,6 +948,7 @@ mod tests {
             jitter: Duration::ZERO,
             peer_locators: Vec::new(),
             no_multicast: false,
+            ipv6: false,
         }
     }
 
@@ -956,6 +1026,88 @@ mod tests {
         // parse_participant_data itself never stamps last_seen — only
         // SpdpService::store_peer does (matches go-DDS's parseParticipantData).
         assert_eq!(proxy.last_seen, None);
+    }
+
+    // ── IPv6 (SpdpConfig::ipv6 / RtpsUdpParticipantConfig::with_ipv6) ────
+    //
+    // No go-DDS byte oracle for these: go-DDS's own `WithIPv6` never
+    // advertises an IPv6 locator in ParticipantProxy at all (a fresh clone's
+    // `buildParticipantData` always calls `locatorFromUDP` with the
+    // IPv4-only `p.metaSock`/`p.dataSock`, never `p.metaSockV6`/
+    // `p.dataSockV6` — see the module docs' "Unicast peer discovery" section
+    // for the same kind of finding on a different go-DDS `Option`). These
+    // tests instead prove the Rust-side family-selection logic is internally
+    // consistent: the already-byte-verified `Locator::udp_v6` encoding
+    // (`locator.rs`) is emitted/decoded/filled-in correctly when
+    // `SpdpConfig::ipv6` is set, symmetrically with the IPv4 case above.
+
+    //fusa:test REQ-RTPS-025
+    #[test]
+    fn build_participant_data_emits_udpv6_locators_when_ipv6_is_set() {
+        let mut cfg = reference_config();
+        cfg.ipv6 = true;
+        let payload = build_participant_data(&cfg);
+        let from = SocketAddr::from((std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 9), 12345));
+        let proxy = parse_participant_data(ascending_prefix(), &payload, from).unwrap();
+
+        let mut expected_addr = [0u8; 16];
+        expected_addr
+            .copy_from_slice(&std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 9).octets());
+        assert_eq!(
+            proxy.metatraffic_unicast,
+            Locator {
+                kind: super::super::locator::LOCATOR_KIND_UDPV6,
+                port: 17410,
+                address: expected_addr,
+            }
+        );
+        assert_eq!(
+            proxy.default_unicast,
+            Locator {
+                kind: super::super::locator::LOCATOR_KIND_UDPV6,
+                port: 17411,
+                address: expected_addr,
+            }
+        );
+    }
+
+    //fusa:test REQ-RTPS-026
+    #[test]
+    fn fill_in_zero_address_does_not_fill_a_family_mismatch() {
+        // A UDPv4-kind zero locator seen from an IPv6 sender (or vice
+        // versa) — should not happen in practice (a participant's own
+        // socket family determines both), but must not panic or silently
+        // fabricate a family-crossed address; left unfilled instead.
+        let v4_zero = Locator::udp_v4([0, 0, 0, 0], 7410);
+        let v6_from = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 12345));
+        let proxy_payload = {
+            let mut enc = PlCdrEncoder::new();
+            enc.add_locator(PID_METATRAFFIC_UNICAST_LOCATOR, &v4_zero);
+            enc.finish()
+        };
+        let proxy = parse_participant_data(ascending_prefix(), &proxy_payload, v6_from).unwrap();
+        assert_eq!(proxy.metatraffic_unicast.address, [0u8; 16]);
+    }
+
+    //fusa:test REQ-RTPS-025
+    #[test]
+    fn spdp_config_with_ipv6_builder_sets_the_flag() {
+        let cfg = SpdpConfig::new(0, ascending_prefix(), 7410, 7411).with_ipv6();
+        assert!(cfg.ipv6);
+        assert!(!SpdpConfig::new(0, ascending_prefix(), 7410, 7411).ipv6);
+    }
+
+    //fusa:test REQ-RTPS-017
+    #[test]
+    fn spdp_multicast_dst_selects_the_configured_address_family() {
+        assert_eq!(
+            spdp_multicast_dst(false, 7400),
+            SocketAddr::from((SPDP_MULTICAST_ADDR, 7400))
+        );
+        assert_eq!(
+            spdp_multicast_dst(true, 7400),
+            SocketAddr::from((SPDP_MULTICAST_ADDR_V6, 7400))
+        );
     }
 
     //fusa:test REQ-RTPS-026

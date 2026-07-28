@@ -48,14 +48,17 @@
 //!
 //! IPv4 is the primary, fully-tested path (mirrors go-DDS's default
 //! configuration). IPv6 socket setup is provided for parity
-//! (`bind_unicast_v6`/`bind_multicast_v6`, `SPDP_MULTICAST_ADDR_V6`) but,
-//! exactly as go-DDS's own docs note for its `WithIPv6` option, it has had
-//! **limited interop testing** — rust-DDS makes no stronger claim here than
-//! go-DDS does.
+//! (`bind_unicast_v6`/`bind_multicast_v6`, `SPDP_MULTICAST_ADDR_V6`,
+//! `USER_DATA_MULTICAST_ADDR_V6`) but, exactly as go-DDS's own docs note for
+//! its `WithIPv6` option, it has had **limited interop testing** — rust-DDS
+//! makes no stronger claim here than go-DDS does. Wired into the public
+//! participant API as `dds_participant::RtpsUdpParticipantConfig::with_ipv6`
+//! (an address-family switch, not a dual-stack add-on — see that method's
+//! docs for why).
 //!
-//! Internal only: not re-exported from the crate root, not yet wired into
-//! `Participant`/`Publisher`/`Subscriber`. Consumed starting with SPDP
-//! (sub-phase 4) and SEDP (sub-phase 5).
+//! Internal only: not re-exported from the crate root. Consumed starting
+//! with SPDP (sub-phase 4), SEDP (sub-phase 5), and, for the public-facing
+//! address-family option, `dds_participant::RtpsUdpParticipantConfig`.
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -136,6 +139,25 @@ pub const USER_DATA_MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 0, 2);
 /// docs' IPv6 note — limited interop testing, same as go-DDS.
 //fusa:req REQ-RTPS-017
 pub const SPDP_MULTICAST_ADDR_V6: Ipv6Addr = Ipv6Addr::new(0xFF03, 0, 0, 0, 0, 0, 0, 1);
+
+/// The IPv6 user-data multicast group, `FF03::2` (domain-scoped via
+/// [`user_multicast_port`]) — the IPv6 counterpart of
+/// [`USER_DATA_MULTICAST_ADDR`], one site-local group index past
+/// [`SPDP_MULTICAST_ADDR_V6`], mirroring the same `::1`/`::2` pairing the
+/// IPv4 SPDP/user-data groups already use (`239.255.0.1`/`239.255.0.2`).
+///
+/// Unlike `SPDP_MULTICAST_ADDR_V6` (which matches go-DDS's
+/// `rtps.spdpMulticastAddrV6` byte-for-byte), this constant has **no go-DDS
+/// oracle**: a fresh go-DDS clone's `WithIPv6` option binds SPDP/meta/data
+/// IPv6 *unicast* sockets but never a user-data IPv6 *multicast* one (see
+/// `rtps/participant.go` — `dataMcastSock`/`userDataMulticastAddr` are
+/// IPv4-only in every go-DDS version this crate has been ported from) — so
+/// there is nothing to byte-diff here, only the same `Pb + DG*domain + 1`
+/// port formula ([`user_multicast_port`]) already verified against go-DDS
+/// applied to a self-consistent new IPv6 group address, chosen by the same
+/// pattern go-DDS's own SPDP/user-data IPv4 pair already establishes.
+//fusa:req REQ-RTPS-060
+pub const USER_DATA_MULTICAST_ADDR_V6: Ipv6Addr = Ipv6Addr::new(0xFF03, 0, 0, 0, 0, 0, 0, 2);
 
 /// Maximum single UDP datagram receive buffer size. Matches go-DDS's
 /// `rtps.maxUDPSize`.
@@ -507,6 +529,20 @@ mod tests {
     #[test]
     fn spdp_multicast_addr_v6_matches_go_dds_reference() {
         assert_eq!(SPDP_MULTICAST_ADDR_V6.to_string(), "ff03::1");
+    }
+
+    // No go-DDS oracle for this one — see USER_DATA_MULTICAST_ADDR_V6's own
+    // doc comment. This test only pins the self-consistent value/pattern
+    // (one group past SPDP_MULTICAST_ADDR_V6, same as the IPv4 pair) so a
+    // future accidental change is caught.
+    //fusa:test REQ-RTPS-060
+    #[test]
+    fn user_data_multicast_addr_v6_is_one_group_past_spdp_multicast_addr_v6() {
+        assert_eq!(USER_DATA_MULTICAST_ADDR_V6.to_string(), "ff03::2");
+        assert_eq!(
+            USER_DATA_MULTICAST_ADDR_V6.segments()[7],
+            SPDP_MULTICAST_ADDR_V6.segments()[7] + 1
+        );
     }
 
     //fusa:test REQ-RTPS-018
