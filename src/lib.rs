@@ -87,6 +87,16 @@ pub mod relay;
 /// traits or by `relay::Node`. See the `rtps` module docs.
 pub mod rtps;
 
+/// Pluggable payload security (`ROADMAP.md`'s "Planned — v0.5 — Security
+/// (Tier 2)" milestone). `pub` for the same reason `rtps`/`shmem` are: a
+/// real, reusable API surface, not dead code — but deliberately not
+/// re-exported from the crate root's `pub use` list either, reached via
+/// `rust_dds::security::SecurityPlugin` the same way
+/// `rust_dds::rtps::dds_participant::RtpsUdpParticipant` and
+/// `rust_dds::shmem::ShmemParticipant` are. See the `security` module's
+/// own docs.
+pub mod security;
+
 /// Shared-memory transport (`ROADMAP.md`'s "Planned — v0.4 —
 /// Shared-Memory Transport" milestone). `pub` for the same reason `rtps`
 /// is: a real, reusable API surface, not dead code — but deliberately not
