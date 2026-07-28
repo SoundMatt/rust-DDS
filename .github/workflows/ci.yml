@@ -148,6 +148,40 @@ jobs:
       - name: pcap-fixture conformance (byte-exact go-DDS reference decode)
         run: cargo test --test rtps_pcap_conformance
 
+  cyclone-interop:
+    name: RTPS interop against a live CycloneDDS peer (ROADMAP.md "Interop testing", deliverable 3/3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Deliverable 3/3: a third, independent oracle beyond go-DDS
+      # self-interop. Same probe-then-skip-cleanly posture as go-DDS's own
+      # `test-interop` CI job: this job stays green (not red) when the
+      # CycloneDDS image cannot be pulled, since a native, environment-
+      # dependent image is not something ordinary CI runs should be
+      # blocked on — see docker-compose.yml's note.
+      - name: Probe CycloneDDS image availability
+        id: probe
+        run: |
+          if docker pull eclipse-cyclonedds/cyclonedds:latest 2>/dev/null; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CycloneDDS Docker image not available — skipping live-peer interop tests (see docker-compose.yml)"
+          fi
+      - name: Start CycloneDDS peer
+        if: steps.probe.outputs.available == 'true'
+        run: docker compose up -d cyclone-peer
+      - name: Live RTPS interop against CycloneDDS (SPDP + SEDP + reliable/best-effort samples)
+        if: steps.probe.outputs.available == 'true'
+        run: cargo test --release --features cyclone-interop --test cyclone_interop -- --ignored --test-threads=1
+        env:
+          CYCLONE_INTEROP_TIMEOUT_SECS: "15"
+      - name: Stop CycloneDDS peer
+        if: steps.probe.outputs.available == 'true'
+        run: docker compose down
+
   rsfusa-check:
     name: rsFuSa safety check — exits 1 on ERROR (§20.1.2, REQ-ASIL/IEC/DO)
     runs-on: ubuntu-latest

@@ -1,6 +1,6 @@
 [package]
 name = "rust-dds"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 description = "rust-DDS: Rust library for DDS (Data Distribution Service) publish/subscribe — RELAY conformant."
 license = "MPL-2.0"
@@ -24,6 +24,17 @@ path = "src/bin/main.rs"
 [[bin]]
 name = "rtps-interop-peer"
 path = "src/bin/rtps_interop_peer.rs"
+
+[features]
+# Gates `tests/cyclone_interop.rs` — RTPS wire-compatibility tests against a
+# live, independent CycloneDDS peer (ROADMAP.md "Interop testing",
+# deliverable 3 of 3). The Rust equivalent of go-DDS's `interop` Go build
+# tag: without this feature the test file does not even compile, so it
+# never runs in the normal `cargo test` sweep or default CI, matching the
+# non-intrusive posture of this crate's own `#[ignore]`d
+# `rtps_two_process_interop` test. See `docker-compose.yml` and the module
+# doc comment at the top of `tests/cyclone_interop.rs` for how to run it.
+cyclone-interop = []
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
