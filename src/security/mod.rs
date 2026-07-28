@@ -42,21 +42,31 @@
 //!   orthogonal authorization mechanism (which participants/writers/
 //!   readers may publish/subscribe to which topics), not a payload-seal/
 //!   -open transform.
+//! - [`replay`] — [`replay::ReplayGuard`], an anti-replay guard that
+//!   tracks recently-seen sequence numbers within a sliding time window.
+//!   Direct port of go-DDS's `security.ReplayGuard`
+//!   (`security/replay.go`). The v0.5 milestone's fifth checklist item,
+//!   "Anti-replay guard (`ReplayGuard`)". Like `AccessPolicy`, it is an
+//!   orthogonal mechanism, not a `SecurityPlugin` payload-seal/open
+//!   transform, and wiring it into
+//!   `crate::rtps::participant::RtpsParticipant`'s receive path remains
+//!   deferred until a concrete caller need arises.
 //!
-//! Not yet landed (later v0.5 checklist items, each its own future
-//! module mirroring go-DDS's corresponding file): an anti-replay guard
-//! (`ReplayGuard`, go-DDS's `security/replay.go`), and HMAC-SHA-256
-//! discovery authentication (go-DDS's `security/discovery.go` — per the
-//! parity build-out plan's Tier 2 section, this last one plugs into SPDP
-//! and is therefore not fully decoupled from `crate::rtps`, unlike
-//! everything else in this module tree, which is transport-agnostic).
+//! Not yet landed (the one remaining v0.5 checklist item, its own future
+//! module mirroring go-DDS's corresponding file): HMAC-SHA-256 discovery
+//! authentication (go-DDS's `security/discovery.go` — per the parity
+//! build-out plan's Tier 2 section, this one plugs into SPDP and is
+//! therefore not fully decoupled from `crate::rtps`, unlike everything
+//! else in this module tree, which is transport-agnostic).
 
 pub mod acl;
 pub mod aes_gcm;
 pub mod hmac;
 pub mod plugin;
+pub mod replay;
 
 pub use acl::{AccessPolicy, Permission, Rule};
 pub use aes_gcm::AesGcmPlugin;
 pub use hmac::HmacPlugin;
 pub use plugin::{NullPlugin, SecurityError, SecurityPlugin};
+pub use replay::{ReplayError, ReplayGuard};

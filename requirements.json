@@ -1523,6 +1523,20 @@
       "text": "AccessPolicy::can_read/can_write shall return false (deny) for a topic that matches no rule, shall stop evaluating further rules once an earlier rule in declaration order matches (first-match-wins, even if that rule denies the permission being checked), and shall silently skip any rule whose pattern is malformed (e.g. unterminated or empty character class) rather than treating it as a match or surfacing an error; evaluation shall never panic on any topic name or pattern input.",
       "category": "cybersecurity",
       "criticality": "critical"
+    },
+    {
+      "id": "REQ-SEC-026",
+      "title": "ReplayGuard sliding-window replay detection",
+      "text": "The system shall provide a ReplayGuard type constructed with a sliding time window (a zero window substituted with a 30-second default) whose check(seq, ts) records seq (keyed on ts) and returns Ok(()) the first time seq is seen within window of ts, and returns ReplayError without re-recording the timestamp on every subsequent call for the same seq within that window, matching go-DDS's ReplayGuard (security/replay.go) behaviour.",
+      "category": "cybersecurity",
+      "criticality": "critical"
+    },
+    {
+      "id": "REQ-SEC-027",
+      "title": "ReplayGuard window pruning and concurrency safety",
+      "text": "ReplayGuard::check shall prune, on every call, all recorded entries whose timestamp is more than window before the call's ts, allowing a previously-seen sequence number to be accepted again once it falls outside the window; ReplayGuard::purge shall perform the same pruning against the current time on demand; ReplayGuard::len shall report the number of currently-tracked entries; and ReplayGuard shall be Send + Sync and safe for concurrent use from multiple tokio tasks without the caller adding external synchronization, matching go-DDS's ReplayGuard.Purge/Len and its documented safe-for-concurrent-use contract.",
+      "category": "cybersecurity",
+      "criticality": "critical"
     }
   ]
 }
