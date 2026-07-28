@@ -854,8 +854,104 @@ harder to change.
 
 ### Planned — v0.4 — Shared-Memory Transport
 
-- [ ] `shmem::ShmemParticipant` — POSIX shared-memory zero-copy transport
-- [ ] `LoaningPublisher` trait with pool-backed zero-copy writes
+- [x] `shmem::ShmemParticipant` — POSIX shared-memory zero-copy transport —
+  landed as `src/shmem/{pool,broker,ipc,participant,loan}.rs`, mirroring
+  this crate's established `src/rtps/` file-per-concern layout inside the
+  existing single `rust_dds` crate per the "Interim structure vs. full
+  cutover" sequencing above (the Cargo workspace split remains gated on
+  RELAY#59). `shmem::ShmemParticipant` implements
+  `Participant`/`Publisher`/`Subscriber` the same way
+  `mock::MockParticipant` and `rtps::dds_participant::RtpsUdpParticipant`
+  do, so `adapt()`/`relay::Node` work with it via `Arc<dyn Participant>`
+  with no changes needed there. Same-process participants on one `Domain`
+  share an in-process `broker::Broker` (structural port of go-DDS's
+  `shmem.go` broker section — zero file I/O for same-process delivery);
+  cross-process delivery (`ipc.rs`) uses a per-(domain, topic) rendezvous
+  file, written atomically (write-then-rename) on every publish and
+  polled by each subscriber, in place of go-DDS's Unix-domain-socket
+  notification — documented and justified in `ipc.rs`'s own module docs:
+  this crate's CI matrix includes `windows-latest`
+  (`cargo test --all-features`), where `AF_UNIX SOCK_DGRAM` is not a
+  portable option, and inspecting a fresh go-DDS clone found its own
+  `shmem` package does not use POSIX `mmap`/`shm_open` either despite its
+  package doc comment's claim — `shmPublish`/`readData` are plain
+  `os.Create`/`os.Open`/`io.ReadFull`, the same category of
+  implementation this port uses. **The "POSIX shared-memory" vs.
+  "zero-`unsafe`" tension flagged before this work started**: real POSIX
+  shared memory (`mmap`/`shm_open`, or a wrapping crate like
+  `memmap2`/`shared_memory`) requires treating a region another process
+  can concurrently mutate as a Rust reference — exactly the aliasing the
+  borrow checker cannot verify, so every such crate's actual byte-access
+  API is an `unsafe fn` one level down. This port does not reach for it:
+  the "shared-memory" transport's data channel is a plain file, preserving
+  REQ-ASIL-002/REQ-MEM-001's zero-`unsafe` bar without exception (grep
+  confirms zero `unsafe` blocks/fns/impls in the whole crate, including
+  this module tree) — the same choice go-DDS's own reference already made
+  in practice, not a new compromise. Also fixes two gaps found in go-DDS's
+  own reference by inspecting a fresh clone rather than assuming: (1)
+  go-DDS's `shmTopicDir` ignores `Domain` entirely for the cross-process
+  rendezvous path (only its in-process `sharedBrokers` map is
+  domain-keyed) — this port's rendezvous path includes the domain; (2)
+  go-DDS's own `shmListener` only reacts to a notification arriving after
+  it starts, so a go-DDS shmem subscriber started after a remote
+  process's last TransientLocal write never receives it cross-process —
+  this port's poller seeds from the rendezvous file's current content on
+  first poll for `DurabilityKind::TransientLocal`, closing that gap; and
+  (3) go-DDS's own reference has a real, its-own-tests-documented
+  same-process double-delivery behavior (`shmem_test.go`'s
+  `TestSequenceNumber_Shmem`/`TestWriterGUID_Shmem` filter it out rather
+  than prevent it) — this port prevents it instead, via a per-process
+  random `origin_id` embedded in every rendezvous-file write that the
+  writing process's own poller skips (see `ipc.rs`'s module docs, "Same-
+  process double-delivery"). `QoS::durability`/`max_sample_size`/
+  `deadline_ns` (the last via the same `participant::spawn_deadline_watcher`
+  every other transport in this crate uses) are enforced the same way
+  `mock::MockParticipant` enforces them; `QoS::reliability` has no
+  shmem-specific meaning (no retransmission concept for a local file
+  write), matching go-DDS. REQ-SHMEM-001..008. Zero `unsafe`
+  (REQ-ASIL-002/REQ-MEM-001). Tested with unit tests per concern
+  (`pool`/`broker`/`ipc`/`participant`/`loan`, including in-process
+  domain/topic isolation, TransientLocal, back-pressure, and an explicit
+  same-process-exactly-once-not-twice regression test) plus a real
+  two-process round-trip test analogous to `rtps_two_process_interop.rs`
+  (`tests/shmem_two_process_interop.rs` + `src/bin/shmem_interop_peer.rs`,
+  a new `shmem-interop` CI job): two independent OS processes exchanging
+  five samples with strictly increasing sequence numbers over the real
+  rendezvous file (no shared `Broker`, no socket), plus a late-joining
+  reader started only *after* the writer process has already published
+  and fully exited, receiving the writer's last TransientLocal value
+  purely from disk — proving the cross-process path is real IPC, not an
+  in-process shortcut.
+- [x] `LoaningPublisher` trait with pool-backed zero-copy writes — the
+  go-DDS `loan.go` zero-copy loan API Tier 1 sub-phase 9 (`rust-DDS#30`)
+  deliberately deferred to this milestone "since it's not meaningful
+  without a zero-copy transport underneath it"; `shmem::ShmemParticipant`
+  (above) is that transport. `LoaningPublisher` (extending `Publisher`
+  with `loan(size)`/`commit(buf)`) is declared in `src/participant.rs`
+  alongside `Publisher`, mirroring go-DDS's own placement of
+  `dds.LoaningPublisher` next to `dds.Publisher` in `dds.go` — so a future
+  transport can implement it too — with `shmem::ShmemLoaningPublisher`
+  (`src/shmem/loan.rs`) as its first implementation, backed by
+  `shmem::pool::BytePool` (a port of go-DDS's `pool.BytePool`, capped at a
+  bounded free-list size rather than go-DDS's GC-reclaimed `sync.Pool`,
+  since Rust has no GC to fall back on for that reclamation).
+  `ShmemParticipant::new_loaning_publisher` is an inherent method on the
+  concrete participant type rather than, as go-DDS's
+  `shmem.NewLoaningPublisher` does, a free function taking `dds.Participant`
+  and type-asserting the concrete publisher it just created — a small,
+  deliberate Rust-idiomatic simplification that turns a go-DDS runtime
+  `ErrLoanBuffer` failure mode (passing the wrong transport's participant
+  in) into a compile error instead, so there is no such failure mode left
+  to test for here. `loan`'s zero-fill of newly-visible buffer bytes (via
+  safe `Vec::resize`, not an `unsafe { set_len }` shortcut) is the one
+  documented, functionally-immaterial difference from go-DDS's raw
+  reused-memory `buf[:size]` re-slice — the caller overwrites the loaned
+  range before `commit` in both implementations regardless. REQ-LOAN-001..
+  003. Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001). Unit-tested: loan/commit
+  round trip delivering through a live subscriber, oversized-loan
+  `Error::LoanBuffer`, loan-after-close `Error::Closed`, pool reuse across
+  repeated loan/commit cycles, and `QoS::max_sample_size` enforcement
+  flowing through `commit`.
 
 ### Planned — v0.5 — Security (Tier 2)
 

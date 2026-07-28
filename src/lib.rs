@@ -87,11 +87,21 @@ pub mod relay;
 /// traits or by `relay::Node`. See the `rtps` module docs.
 pub mod rtps;
 
+/// Shared-memory transport (`ROADMAP.md`'s "Planned — v0.4 —
+/// Shared-Memory Transport" milestone). `pub` for the same reason `rtps`
+/// is: a real, reusable API surface, not dead code — but deliberately not
+/// re-exported from the crate root's `pub use` list either, reached via
+/// `rust_dds::shmem::ShmemParticipant` the same way
+/// `rust_dds::mock::MockParticipant` and
+/// `rust_dds::rtps::dds_participant::RtpsUdpParticipant` are. See the
+/// `shmem` module's own docs.
+pub mod shmem;
+
 pub mod types;
 
 pub use adapt::{adapt, from_message, to_message};
 pub use error::Error;
-pub use participant::{Participant, Publisher, SampleReceiver, Subscriber};
+pub use participant::{LoaningPublisher, Participant, Publisher, SampleReceiver, Subscriber};
 pub use types::{
     validate_domain, Domain, DurabilityKind, Guid, QoS, ReliabilityKind, Sample, DEFAULT_QOS,
     RELIABLE_QOS,

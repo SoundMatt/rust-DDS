@@ -875,7 +875,10 @@ mod tests {
         // This test is a traceability anchor. The absence of unsafe blocks
         // is verified statically by the Rust compiler and confirmed by audit.
         // Any future unsafe block requires a SAFETY comment justifying it.
-        assert!(true);
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(true);
+        }
     }
 
     //fusa:test REQ-HAZ-002
@@ -1170,6 +1173,9 @@ mod tests {
         // REQ-CM-001: DCO Signed-off-by enforced by dco CI job on every PR.
         // REQ-CM-002: every release tagged with semantic version in GitHub.
         // REQ-CM-003: sbom.json committed and checked by safety-artifacts CI job.
-        assert!(true);
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(true);
+        }
     }
 }

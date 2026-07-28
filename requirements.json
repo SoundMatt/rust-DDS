@@ -1376,6 +1376,83 @@
       "text": "The system's general-purpose XCDR1 decoder shall decode a CDR string/byte-sequence by reading its 4-byte length/count prefix and then that many bytes, returning an error rather than panicking or indexing out of bounds when the declared length exceeds the remaining buffer, and shall lossily convert invalid UTF-8 in a decoded string rather than rejecting it outright so malformed or hostile input cannot abort decoding of the rest of the message, matching go-DDS's tools/cdr package (cdr.Decoder.ReadString/ReadBytes) behaviourally with that one deliberate safety deviation (go-DDS's ReadString does not validate UTF-8 at all, since Go strings may hold arbitrary bytes).",
       "category": "functional",
       "criticality": "medium"
+    },
+    {
+      "id": "REQ-SHMEM-001",
+      "title": "ShmemParticipant construction and domain validation",
+      "text": "The system shall provide a shmem::ShmemParticipant implementing the Participant/Publisher/Subscriber traits, constructed via ShmemParticipant::new(domain), validating domain into the same [0, 232] range as every other Participant implementation and returning Error::DomainOutOfRange outside it; ShmemParticipant::close shall be idempotent and, after close, new_publisher shall return Error::Closed.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-SHMEM-002",
+      "title": "Same-process delivery via a shared in-process broker",
+      "text": "Every ShmemParticipant constructed for the same Domain within one OS process shall share one in-process broker, and Publisher::write on a topic shall deliver the sample exactly once to every current process-local Subscriber registered on that same topic, with zero file I/O on the delivery path to those subscribers.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-SHMEM-003",
+      "title": "Cross-process delivery via a per-topic rendezvous file",
+      "text": "Publisher::write shall additionally write the sample to a per-(domain, topic) rendezvous file on disk, atomically (write-then-rename) so a concurrent reader never observes a torn write; a Subscriber in a different OS process on the same domain and topic shall receive the sample by polling that file, with the writing process's own same-process subscribers not redelivered the same sample a second time through the cross-process path.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-SHMEM-004",
+      "title": "TransientLocal late-joiner delivery, in-process and cross-process",
+      "text": "A Subscriber created with QoS::durability == TransientLocal shall receive the topic's last published value: from the in-process broker's cache when the last writer was in the same OS process, or from the current content of the cross-process rendezvous file when the last writer was a different OS process (including one that has already exited); a Subscriber created with QoS::durability == Volatile shall never receive a sample published before it was created, on either path.",
+      "category": "functional",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-SHMEM-005",
+      "title": "MaxSampleSize enforced on shmem writes",
+      "text": "shmem::ShmemPublisher::write shall return Error::PayloadTooLarge when QoS::max_sample_size is non-zero and the payload exceeds it, and shall accept any payload size when QoS::max_sample_size is zero, matching mock::MockParticipant's enforcement.",
+      "category": "validation",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-SHMEM-006",
+      "title": "Domain isolation for the shmem transport",
+      "text": "Participants on different Domain values shall never share an in-process broker and shall never share a cross-process rendezvous file, even when constructed with an identical topic name; a sample published on one domain shall never be delivered to a subscriber on a different domain via either the in-process or cross-process path.",
+      "category": "functional-safety",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-SHMEM-007",
+      "title": "Topic isolation for the shmem transport",
+      "text": "A sample published on one topic shall never be delivered to a subscriber registered on a different topic, on either the in-process broker path or the cross-process rendezvous-file path.",
+      "category": "functional-safety",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-SHMEM-008",
+      "title": "Publisher/Subscriber lifecycle on the shmem transport",
+      "text": "shmem::ShmemPublisher::write shall return Error::Closed after Publisher::close; shmem::ShmemParticipant::close shall be idempotent and, once closed, new_publisher and new_subscriber shall return Error::Closed; Subscriber::close shall stop both the in-process and cross-process delivery paths for that subscriber and cause SampleReceiver::recv to return None once drained.",
+      "category": "lifecycle",
+      "criticality": "high"
+    },
+    {
+      "id": "REQ-LOAN-001",
+      "title": "LoaningPublisher trait extends Publisher",
+      "text": "The system shall expose a LoaningPublisher trait extending Publisher with loan(size) and commit(buf) methods, and shmem::ShmemParticipant shall provide a constructor returning a LoaningPublisher backed by the shmem transport; loan shall return Error::Closed once the underlying publisher is closed.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-LOAN-002",
+      "title": "Loan returns a pool-backed pre-allocated buffer",
+      "text": "LoaningPublisher::loan(size) shall return a buffer of length size backed by the publisher's internal buffer pool rather than a fresh heap allocation whenever the pool has a suitably-sized buffer available, and shall return Error::LoanBuffer when size exceeds the pool's configured minimum capacity.",
+      "category": "real-time",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-LOAN-003",
+      "title": "Commit publishes the loaned buffer and returns it to the pool",
+      "text": "LoaningPublisher::commit(buf) shall publish buf via the same delivery path as Publisher::write and shall return buf to the pool for reuse by a subsequent loan call regardless of whether the publish succeeded.",
+      "category": "real-time",
+      "criticality": "medium"
     }
   ]
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rust-dds"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2021"
 description = "rust-DDS: Rust library for DDS (Data Distribution Service) publish/subscribe — RELAY conformant."
 license = "MPL-2.0"
@@ -24,6 +24,14 @@ path = "src/bin/main.rs"
 [[bin]]
 name = "rtps-interop-peer"
 path = "src/bin/rtps_interop_peer.rs"
+
+# Test/dev support tool for the shmem transport's live two-process interop
+# test (ROADMAP.md "Planned — v0.4 — Shared-Memory Transport"), analogous
+# to rtps-interop-peer above but for shmem::ShmemParticipant — not part of
+# the public library API. See src/bin/shmem_interop_peer.rs's module docs.
+[[bin]]
+name = "shmem-interop-peer"
+path = "src/bin/shmem_interop_peer.rs"
 
 [features]
 # Gates `tests/cyclone_interop.rs` — RTPS wire-compatibility tests against a
