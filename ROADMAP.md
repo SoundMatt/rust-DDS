@@ -1117,7 +1117,53 @@ harder to change.
   `READ_WRITE == READ | WRITE` bitwise identity, independence of the
   read/write bits, a broader-earlier-rule-shadows-narrower-later-rule
   case, and `Send + Sync`/multi-task `tokio::spawn` concurrency).
-- [ ] Anti-replay guard (`ReplayGuard`)
+- [x] Anti-replay guard (`ReplayGuard`) — landed as `src/security/replay.rs`'s
+  `ReplayGuard`. Direct port of go-DDS's `security.ReplayGuard`
+  (`github.com/SoundMatt/go-DDS`, `security/replay.go`): `ReplayGuard::new`
+  takes a sliding window (a zero window is replaced with a 30-second
+  default, matching go-DDS's `window <= 0` substitution — narrowed to
+  `Duration::ZERO` here since `Duration` cannot be negative); `check(seq,
+  ts)` records `seq` keyed on the caller-supplied timestamp `ts` and
+  returns `Ok(())` the first time `seq` is seen within `window` of `ts`,
+  or `ReplayError` (a dedicated sentinel error type mirroring go-DDS's
+  `ErrReplay`, not a `SecurityError` variant, since `ReplayGuard` is not a
+  `SecurityPlugin`) on every later call for the same `seq` within that
+  window; `purge`/`len` mirror go-DDS's `Purge`/`Len` directly. Like
+  `AccessPolicy`, `ReplayGuard` is an orthogonal mechanism, not a
+  `SecurityPlugin` payload-seal/open transform, and wiring it into
+  `rtps::participant::RtpsParticipant`'s receive path remains deferred
+  until a concrete caller need arises, consistent with every other item in
+  this milestone. go-DDS's `Check(seq uint64, ts time.Time)` takes an
+  explicit wall-clock timestamp so its own tests can drive the window
+  against a synthetic timeline; this port keeps that explicit-timestamp
+  design but represents `ts` as `std::time::Instant` rather than
+  `SystemTime`/`chrono`, matching this crate's own established
+  freshness-window convention (`rtps::spdp::PeerProxy::last_seen`,
+  `rtps::fragment::FragBuffer::created`) and supporting exactly the
+  arithmetic go-DDS's own tests need (`Instant::now() - Duration` /
+  `Instant::now() + Duration` to construct a synthetic past/future
+  timestamp) via `Instant::checked_sub` so a window longer than the
+  process's elapsed monotonic time can never panic. Concurrency-safe via
+  an internal `std::sync::Mutex<HashMap<u64, Instant>>` (the same
+  interior-mutability shape `rtps::fragment::FragmentAssembler` already
+  uses for its own map), with every method taking `&self` so a single
+  `ReplayGuard` is directly shareable behind an `Arc` — matching go-DDS's
+  own "safe for concurrent use from multiple goroutines" contract for
+  `ReplayGuard`. Adds REQ-SEC-026/REQ-SEC-027 (continuing after
+  REQ-SEC-024/025) with full `fusa:req`/`fusa:test` traceability. Zero
+  `unsafe` (REQ-ASIL-002/REQ-MEM-001); no `.unwrap()` on any user-visible
+  (non-test) path (REQ-ASIL-003) — including mutex-poisoning recovery via
+  `unwrap_or_else(|e| e.into_inner())`, matching
+  `rtps::fragment::FragmentAssembler`'s own pattern, and pruning via
+  `checked_sub` rather than a plain, panicking `Instant` subtraction.
+  Unit-tested per this crate's established per-module convention: a 1:1
+  port of every test in go-DDS's own `replay_test.go` (first-seen
+  allowed, replay detected, different-sequence allowed, purge removes
+  expired entries, expired sequence allowed again after the window,
+  zero-window default substitution, `len` tracks count, and a
+  multi-task concurrent-check exercise), plus additional coverage
+  (`is_empty`, a replay not resetting the originally-recorded timestamp,
+  `Send + Sync`, and the `ReplayError` display text).
 - [ ] HMAC-SHA-256 discovery authentication
 
 ### Planned — v0.6 — Observability (Tier 5)
