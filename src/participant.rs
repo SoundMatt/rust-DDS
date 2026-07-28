@@ -12,13 +12,15 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 
 use crate::error::Error;
-use crate::relay::{Context, SubscriberOptions};
+use crate::relay::{Context, DeadlineCallback, SubscriberOptions};
 use crate::types::{Domain, QoS, Sample};
 
 // ---------------------------------------------------------------------------
@@ -46,6 +48,17 @@ pub(crate) struct SubInner {
     pub(crate) notify: Notify,
     pub(crate) closed: AtomicBool,
     pub(crate) unsubscribed: AtomicBool,
+    /// Notified on every `push()` and on `close()` — consumed by an optional
+    /// Deadline QoS watcher task (see [`spawn_deadline_watcher`]) to detect
+    /// "a sample arrived" (re-arm the deadline window) or "the subscriber
+    /// closed" (stop watching) without polling.
+    ///
+    /// Deliberately a *separate* `Notify` from `notify` above: `notify` is
+    /// awaited by `SampleReceiver::recv()`, and `Notify::notify_one` wakes
+    /// at most one registered waiter — sharing one `Notify` between `recv()`
+    /// and a deadline watcher would race the two consumers and could starve
+    /// either one of a wakeup.
+    pub(crate) deadline_notify: Notify,
 }
 
 impl SubInner {
@@ -60,6 +73,7 @@ impl SubInner {
             notify: Notify::new(),
             closed: AtomicBool::new(false),
             unsubscribed: AtomicBool::new(false),
+            deadline_notify: Notify::new(),
         }
     }
 
@@ -95,6 +109,10 @@ impl SubInner {
             }
         }
         self.notify.notify_one();
+        // Deadline QoS (§15.2): a sample just arrived on this reader, so any
+        // running deadline watcher must re-arm its window from now rather
+        // than fire on the window that started before this sample landed.
+        self.deadline_notify.notify_one();
         true
     }
 
@@ -108,6 +126,10 @@ impl SubInner {
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
+        // Wake any running deadline watcher immediately so it observes
+        // `closed` and stops on its next loop iteration, rather than
+        // lingering up to one more deadline period before checking.
+        self.deadline_notify.notify_waiters();
     }
 
     //fusa:req REQ-HAZ-005
@@ -117,6 +139,72 @@ impl SubInner {
         // and return None rather than blocking indefinitely.
         self.close();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Deadline QoS enforcement
+// ---------------------------------------------------------------------------
+
+/// Spawn a Deadline QoS watcher task for `inner`, per RELAY spec §15.2 and
+/// DDS `DEADLINE` QoS semantics: fires `callback` whenever `deadline_ns`
+/// nanoseconds elapse without a new sample reaching `inner` (via
+/// [`SubInner::push`]).
+///
+/// Returns `None` when `deadline_ns == 0` (Deadline QoS disabled) — no task
+/// is spawned and there is nothing to stop later. Otherwise spawns one
+/// `tokio` task, independently stoppable via the returned [`JoinHandle`],
+/// following the same per-reader background-task idiom already used
+/// elsewhere in this crate (the SPDP announce loop, the reliable-writer
+/// HEARTBEAT loop). The task also exits on its own — without needing to be
+/// aborted — once `inner` observes `closed` or `unsubscribed`, both of which
+/// wake it immediately via `deadline_notify` (see [`SubInner::close`]);
+/// callers still hold the `JoinHandle` and abort it for symmetry with this
+/// crate's other lifecycle-tied tasks (e.g. `RtpsPublisher::heartbeat_task`)
+/// and to guarantee prompt termination rather than relying solely on the
+/// task's own next wakeup.
+///
+/// Timer semantics deliberately mirror go-DDS's reference implementation
+/// (`time.AfterFunc` + `Timer::Reset` in `mock.go`/`rtps/participant.go`):
+/// each sample delivery restarts a fresh `deadline_ns` window; if the window
+/// elapses uninterrupted, `callback` fires and a new window starts
+/// immediately (the callback keeps firing once per elapsed interval for as
+/// long as no sample arrives), rather than firing only once ever.
+///
+/// Callers are responsible for arming this only when a callback is actually
+/// registered ([`SubscriberOptions::deadline_missed`] is `Some`) — a
+/// non-zero `deadline_ns` with no callback is a documented no-op, matching
+/// go-DDS.
+//fusa:req REQ-QOS-008
+//fusa:req REQ-QOS-009
+pub(crate) fn spawn_deadline_watcher(
+    inner: &Arc<SubInner>,
+    deadline_ns: u64,
+    callback: DeadlineCallback,
+) -> Option<JoinHandle<()>> {
+    if deadline_ns == 0 {
+        return None;
+    }
+    let period = Duration::from_nanos(deadline_ns);
+    let inner = Arc::clone(inner);
+    Some(tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                // The full `period` elapsed with no `push()` in between —
+                // Deadline missed.
+                _ = tokio::time::sleep(period) => {}
+                // A sample was delivered (or the subscriber closed) before
+                // `period` elapsed — restart the window from here rather
+                // than firing.
+                _ = inner.deadline_notify.notified() => {
+                    continue;
+                }
+            }
+            if inner.closed.load(Ordering::SeqCst) || inner.unsubscribed.load(Ordering::SeqCst) {
+                break;
+            }
+            callback.fire();
+        }
+    }))
 }
 
 /// The receiving end of a DDS subscriber channel.

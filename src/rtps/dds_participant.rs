@@ -597,6 +597,13 @@ impl Participant for RtpsUdpParticipant {
         }
         let reliable = qos.reliability == ReliabilityKind::Reliable;
         let transient_local = qos.durability == DurabilityKind::TransientLocal;
+        // Deadline QoS (§15.2) is enforced at this layer, not inside
+        // `RtpsParticipant`'s reader constructors — those take only `opts`,
+        // not `qos`, the same reason `RtpsPublisher::max_sample_size` is
+        // enforced here rather than inside `RtpsWriter::write` (see that
+        // field's doc comment below): the RTPS engine layer has no `QoS` of
+        // its own to consult.
+        let deadline_missed = opts.deadline_missed.clone();
         let (receiver, reader) = match (reliable, transient_local) {
             (false, false) => self.inner.new_reader(topic, opts).await,
             (true, false) => self.inner.new_reliable_reader(topic, opts).await,
@@ -611,9 +618,16 @@ impl Participant for RtpsUdpParticipant {
         let inner = Arc::clone(&receiver.inner);
         self.subscribers.lock().unwrap().push(Arc::clone(&inner));
 
+        // Only armed when both the QoS interval and a callback are present —
+        // a non-zero deadline_ns with no registered callback is a documented
+        // no-op, matching go-DDS.
+        let deadline_task = deadline_missed
+            .and_then(|cb| crate::participant::spawn_deadline_watcher(&inner, qos.deadline_ns, cb));
+
         let sub = RtpsSubscriber {
             reader: Arc::new(reader),
             inner,
+            deadline_task: Mutex::new(deadline_task),
         };
         Ok((receiver, Box::new(sub)))
     }
@@ -712,6 +726,12 @@ impl Publisher for RtpsPublisher {
 struct RtpsSubscriber {
     reader: Arc<RtpsReader>,
     inner: Arc<SubInner>,
+    /// Deadline QoS watcher task (§15.2), `Some` only when `QoS::deadline_ns`
+    /// was non-zero and a callback was registered via
+    /// `SubscriberOptions::deadline_missed` at subscribe time. Aborted on
+    /// `close()` for prompt shutdown, mirroring `RtpsPublisher::heartbeat_task`
+    /// — see `participant::spawn_deadline_watcher`.
+    deadline_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[async_trait]
@@ -749,6 +769,9 @@ impl Subscriber for RtpsSubscriber {
     async fn close(&self) -> Result<(), Error> {
         self.inner.close();
         self.reader.unsubscribe().await;
+        if let Some(task) = self.deadline_task.lock().unwrap().take() {
+            task.abort();
+        }
         Ok(())
     }
 }
@@ -1189,5 +1212,63 @@ mod tests {
             return; // no IPv6 / no IPv6-multicast-capable interface here
         };
         assert_eq!(p.domain(), Domain(222));
+    }
+
+    // Deadline QoS (§15.2) — proves the enforcement wired up in
+    // `RtpsUdpParticipant::new_subscriber` behaves identically to
+    // `mock::MockParticipant`'s (see `mock::tests::deadline_*`), since both
+    // ultimately share `participant::spawn_deadline_watcher` over the same
+    // `Arc<SubInner>` choke point. Uses `RELIABLE_QOS`'s Reliable +
+    // TransientLocal combination deliberately, since Deadline QoS must be
+    // enforced uniformly across both reliability and durability axes.
+
+    //fusa:test REQ-QOS-008
+    //fusa:test REQ-QOS-009
+    #[tokio::test]
+    async fn deadline_fires_without_samples_and_resets_when_samples_arrive() {
+        let Ok(p) = RtpsUdpParticipant::new(Domain(223)).await else {
+            return; // no multicast-capable interface in this environment
+        };
+        let p: Arc<dyn Participant> = p;
+
+        let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let mut qos = RELIABLE_QOS.clone();
+        qos.deadline_ns = 30_000_000; // 30ms
+        let opts = crate::relay::with_deadline_callback(move || {
+            fired_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let (rx, sub) = p
+            .new_subscriber("DeadlineTopic", qos.clone(), opts)
+            .await
+            .unwrap();
+
+        // Phase 1: no publisher exists yet — the deadline must fire at
+        // least once while the reader sits idle.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            fired.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "expected the Deadline-missed callback to fire while idle"
+        );
+
+        // Phase 2: start publishing well within the deadline window and
+        // confirm the callback stops firing — proves each delivered sample
+        // resets the window rather than the timer having stopped for some
+        // other reason (e.g. already cancelled).
+        let pub_ = p.new_publisher("DeadlineTopic", qos).await.unwrap();
+        let before_phase2 = fired.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..6 {
+            pub_.write(b"tick".to_vec()).await.unwrap();
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let after_phase2 = fired.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            after_phase2, before_phase2,
+            "Deadline-missed callback must not fire while samples keep arriving within the window"
+        );
+
+        sub.close().await.unwrap();
     }
 }

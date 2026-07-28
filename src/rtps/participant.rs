@@ -1532,6 +1532,7 @@ mod tests {
             channel_depth: 1,
             back_pressure: BackPressurePolicy::DropNewest,
             topic: None,
+            deadline_missed: None,
         };
         let (rx, _reader) = p.new_reader("Square", opts).await;
         let writer = p.new_writer("Square").await;

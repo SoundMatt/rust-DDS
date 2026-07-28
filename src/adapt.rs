@@ -112,6 +112,7 @@ impl relay::Node for DdsNode {
             channel_depth: depth,
             back_pressure: policy,
             topic: None,
+            deadline_missed: None,
         };
 
         let (rx, sub) = self
