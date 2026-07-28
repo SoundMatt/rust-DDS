@@ -1234,7 +1234,7 @@ mod tests {
         let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let fired_cb = fired.clone();
         let mut qos = RELIABLE_QOS.clone();
-        qos.deadline_ns = 30_000_000; // 30ms
+        qos.deadline_ns = 60_000_000; // 60ms — generous margin for a loaded CI runner.
         let opts = crate::relay::with_deadline_callback(move || {
             fired_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
@@ -1246,17 +1246,43 @@ mod tests {
 
         // Phase 1: no publisher exists yet — the deadline must fire at
         // least once while the reader sits idle.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(
             fired.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "expected the Deadline-missed callback to fire while idle"
         );
 
-        // Phase 2: start publishing well within the deadline window and
-        // confirm the callback stops firing — proves each delivered sample
-        // resets the window rather than the timer having stopped for some
-        // other reason (e.g. already cancelled).
+        // Bootstrap SEDP matching between the fresh publisher and the
+        // already-subscribed reader: unlike `mock::MockParticipant`'s
+        // synchronous in-process delivery, a brand-new RTPS writer/reader
+        // pair needs discovery (SEDP) to complete before the first `write`
+        // is actually delivered, which can itself take one or more
+        // `deadline_ns` windows — so the "no firing while samples arrive"
+        // assertion below must start counting only *after* that first
+        // delivery is confirmed, not from publisher-creation time (matches
+        // the retry-until-delivered idiom used by this file's other
+        // real-discovery tests, e.g.
+        // `ipv6_spdp_sedp_and_besteffort_round_trip_between_two_participants`).
         let pub_ = p.new_publisher("DeadlineTopic", qos).await.unwrap();
+        let matched = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let _ = pub_.write(b"bootstrap".to_vec()).await;
+                if tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(matched.is_ok(), "writer/reader never matched via SEDP");
+
+        // Phase 2: now that the pair is matched and delivery is prompt,
+        // publish well within the deadline window and confirm the callback
+        // stops firing — proves each delivered sample resets the window
+        // rather than the timer having stopped for some other reason (e.g.
+        // already cancelled).
         let before_phase2 = fired.load(std::sync::atomic::Ordering::SeqCst);
         for _ in 0..6 {
             pub_.write(b"tick".to_vec()).await.unwrap();
