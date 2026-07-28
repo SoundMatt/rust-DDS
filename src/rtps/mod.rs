@@ -62,6 +62,18 @@
 //! docs. Every other module in this tree remains internal: not
 //! re-exported from the crate root, not wired into the public traits.
 //!
+//! `xcdr` (`ROADMAP.md`'s "Planned — v0.2 — RTPS Transport (Tier 1)"
+//! milestone, "CDR/XCDR1 serialization for RTPS wire format") is the
+//! general-purpose primitive-type CDR/XCDR1 codec for typed, non-opaque
+//! DATA/DATA_FRAG payloads — deliberately distinct from `cdr`'s
+//! `PL_CDR_LE` parameter-list codec (sub-phase 2); see `xcdr`'s own module
+//! docs for the split. It is what `RtpsWriter::write`'s existing
+//! already-opaque-byte-blob input would sit on top of for typed
+//! application data; it does not itself change `RtpsWriter::write`'s
+//! signature or wire into `dds_participant`, matching how sub-phase 2's
+//! `cdr` module also landed unwired ahead of the sub-phases that used it.
+//!
+
 //! Byte layout for every type here is derived from go-DDS's `rtps` package
 //! (`github.com/SoundMatt/go-DDS`, RTPS 2.3), which the roadmap designates
 //! as the correctness oracle for this port — same wire format, same
@@ -102,6 +114,7 @@ pub mod sedp;
 pub mod spdp;
 pub mod transport;
 pub mod wildcard;
+pub mod xcdr;
 
 use thiserror::Error;
 

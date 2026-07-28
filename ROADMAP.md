@@ -568,7 +568,12 @@ All land in `dds-tools` (idl/cdr/xtypes) except `tsn`, which extends the
 - **`dds-tools::cdr`** — general-purpose XCDR1 (and eventually XCDR2)
   codec for typed payload (de)serialization, used by IDL-generated code.
   go-DDS: 348 LOC. Distinct from Tier 1's minimal wire-framing CDR (see
-  Tier 1, sub-phase 2).
+  Tier 1, sub-phase 2). **Already landed** as `rtps::xcdr` under the "v0.2
+  — RTPS Transport (Tier 1)" milestone's "CDR/XCDR1 serialization for RTPS
+  wire format" item (in-crate, ahead of `dds-tools` existing) — this
+  bullet is left here as the pointer to where an eventual XCDR2 extension,
+  and/or a Tier-3-time extraction of `rtps::xcdr` into this crate, would
+  land; it is not unstarted work.
 - **`dds-tools::idl`** — IDL parsing and code generation, plus a
   `dds-tools` CLI binary mirroring go-DDS's `cmd/ddstool`. go-DDS: 1,382
   LOC — the largest single item in this tier.
@@ -666,7 +671,32 @@ harder to change.
   built (BestEffort/Reliable × Volatile/TransientLocal). `adapt()`/
   `relay::Node` need no change: they already work with any
   `Arc<dyn Participant>`. Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001).
-- [ ] CDR/XCDR1 serialization for RTPS wire format
+- [x] CDR/XCDR1 serialization for RTPS wire format — the general-purpose
+  primitive-type CDR/XCDR1 codec for typed, non-opaque DATA/DATA_FRAG
+  payloads, deliberately distinct from Tier 1 sub-phase 2's `cdr` module
+  (`PL_CDR_LE` parameter-list codec + `wrap_payload`/`unwrap_payload`
+  plain-payload encapsulation helpers, `rust-DDS#23`) — that sub-phase's
+  own "Done" note flagged this as future work. Landed as
+  `rtps::xcdr::{XcdrEncoder, XcdrDecoder}`: encode/decode of bool, octet
+  (signed/unsigned), char, 16/32/64-bit signed/unsigned integers, 32/64-bit
+  IEEE 754 floats, CDR strings, and byte sequences, little-endian, each
+  primitive aligned to its own size (1/2/4/8 bytes) counted from the start
+  of the 4-byte `CDR_LE` encapsulation header exactly like go-DDS's own
+  alignment origin — ported 1:1 from go-DDS's top-level `cdr` package
+  (`tools/cdr/cdr.go`, 348 LOC, matching this item's original scope note).
+  Structs and typed sequences are composed by callers from these primitive
+  writes/reads in sequence (the same convention go-DDS's own `cdr` package
+  uses — it has no dedicated struct or typed-sequence type either), which
+  is what IDL-generated (de)serialization code will eventually do; this
+  item is the primitive codec those callers compose, not a code generator.
+  Every encode case is verified byte-for-byte against real go-DDS `cdr`
+  package reference output (`REQ-RTPS-063`–`066`), and no `unsafe`
+  anywhere (REQ-ASIL-002/REQ-MEM-001). Scoped inside the existing
+  single `rust_dds` crate per this roadmap's own crate-cutover sequencing
+  (see "Module naming caveat" above) — not a new `dds-tools` crate, which
+  remains gated to Tier 3 pending RELAY#59 naming ratification; see the
+  Tier 3 "xtypes, tsn, idl/cdr" section's `dds-tools::cdr` bullet for the
+  note on a possible later extraction into that crate once it exists.
 - [x] SPDP participant discovery (multicast + unicast) — the multicast half
   landed with sub-phase 4 (`rust-DDS#25`) and has been wired into
   `RtpsUdpParticipant` since v0.13; this item's own remaining scope — a
