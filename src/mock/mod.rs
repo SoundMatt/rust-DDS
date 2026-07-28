@@ -34,6 +34,40 @@ struct TopicState {
     /// TransientLocal cache: last `history_depth` samples.
     cache: VecDeque<Sample>,
     history_depth: usize,
+    /// Per-topic write/deliver/drop/byte counters — `observability::MetricsProvider`
+    /// (`ROADMAP.md`'s "Planned — v0.6 — Observability (Tier 5)" milestone).
+    /// Plain `AtomicU64`s, not behind their own lock: `topics` (the map
+    /// these live inside) is already `std::sync::Mutex`-guarded, and that
+    /// lock is only ever held briefly (never across an `.await`), so
+    /// `MetricsProvider::topic_metrics`'s synchronous read needs nothing
+    /// more elaborate — see `observability::metrics`'s module docs.
+    metrics: TopicCounters,
+}
+
+/// Per-topic counters backing [`TopicState::metrics`] and, in every other
+/// concrete `Participant` implementation this crate has
+/// (`shmem::broker::Broker`, `rtps::participant::RtpsParticipant`), their
+/// own analogous per-topic counter type.
+#[derive(Default)]
+struct TopicCounters {
+    writes: AtomicU64,
+    delivers: AtomicU64,
+    drops: AtomicU64,
+    bytes_written: AtomicU64,
+    bytes_delivered: AtomicU64,
+}
+
+impl TopicCounters {
+    fn snapshot(&self, topic: &str) -> crate::observability::TopicMetrics {
+        crate::observability::TopicMetrics {
+            topic: topic.to_string(),
+            write_count: self.writes.load(Ordering::Relaxed),
+            deliver_count: self.delivers.load(Ordering::Relaxed),
+            drop_count: self.drops.load(Ordering::Relaxed),
+            bytes_written: self.bytes_written.load(Ordering::Relaxed),
+            bytes_delivered: self.bytes_delivered.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl TopicState {
@@ -42,6 +76,7 @@ impl TopicState {
             subscribers: Vec::new(),
             cache: VecDeque::with_capacity(history_depth.max(1)),
             history_depth,
+            metrics: TopicCounters::default(),
         }
     }
 
@@ -69,11 +104,19 @@ impl Broker {
     //fusa:req REQ-IEC-007
     //fusa:req REQ-RT-004
     //fusa:req REQ-DO-008
+    //fusa:req REQ-MON-006
     fn publish(&self, topic: &str, sample: Sample, qos: &QoS) {
         let mut topics = self.topics.lock().unwrap();
         let state = topics
             .entry(topic.to_string())
             .or_insert_with(|| TopicState::new(qos.history_depth.max(1) as usize));
+
+        let payload_len = sample.payload.len() as u64;
+        state.metrics.writes.fetch_add(1, Ordering::Relaxed);
+        state
+            .metrics
+            .bytes_written
+            .fetch_add(payload_len, Ordering::Relaxed);
 
         if qos.durability == DurabilityKind::TransientLocal {
             state.push_to_cache(sample.clone());
@@ -83,8 +126,34 @@ impl Broker {
             .subscribers
             .retain(|sub| !sub.closed.load(Ordering::SeqCst));
         for sub in &state.subscribers {
-            sub.push(sample.clone());
+            if sub.push(sample.clone()) {
+                state.metrics.delivers.fetch_add(1, Ordering::Relaxed);
+                state
+                    .metrics
+                    .bytes_delivered
+                    .fetch_add(payload_len, Ordering::Relaxed);
+            } else {
+                state.metrics.drops.fetch_add(1, Ordering::Relaxed);
+            }
         }
+    }
+
+    /// Snapshot of per-topic write/deliver/drop/byte counters, one entry
+    /// per topic this broker has observed at least one publish for —
+    /// `observability::MetricsProvider`'s backing data for
+    /// `MockParticipant`. A topic with only a `subscribe` call and no
+    /// `publish` yet (this broker's `topics` map entries are created by
+    /// both) is omitted, matching go-DDS's own `topicCounterFor`, which is
+    /// reached only from `publish`/`deliver`, never `subscribe`.
+    //fusa:req REQ-MON-006
+    fn topic_metrics(&self) -> Vec<crate::observability::TopicMetrics> {
+        self.topics
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, state)| state.metrics.writes.load(Ordering::Relaxed) > 0)
+            .map(|(topic, state)| state.metrics.snapshot(topic))
+            .collect()
     }
 
     //fusa:req REQ-MEM-002
@@ -359,6 +428,18 @@ impl crate::observability::HealthProvider for MockParticipant {
             return crate::observability::Health::down(r#"{"state":"closed"}"#);
         }
         crate::observability::Health::ok()
+    }
+}
+
+/// `MockParticipant`'s [`MetricsProvider`](crate::observability::MetricsProvider)
+/// implementation: delegates directly to this participant's own
+/// `Broker::topic_metrics`, which every [`MockPublisher::write`] and
+/// [`Broker::publish`] call updates as it happens. Direct port of go-DDS's
+/// `mock.participant.TopicMetrics` (`mock/mock.go`).
+//fusa:req REQ-MON-006
+impl crate::observability::MetricsProvider for MockParticipant {
+    fn topic_metrics(&self) -> Vec<crate::observability::TopicMetrics> {
+        self.broker.topic_metrics()
     }
 }
 
@@ -1044,6 +1125,113 @@ mod tests {
         let h = p.health();
         assert_eq!(h.status, HealthStatus::Down);
         assert_eq!(h.details.as_deref(), Some(r#"{"state":"closed"}"#));
+    }
+
+    /// `MockParticipant::topic_metrics` counts writes and successful
+    /// deliveries per topic, and omits topics with no writes yet.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn mock_participant_topic_metrics_counts_writes_and_delivers() {
+        use crate::observability::MetricsProvider;
+
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        // Subscribing alone (no publish yet) must not create a reported
+        // topic-metrics entry — matches go-DDS's `topicCounterFor`, which
+        // `subscribe` never reaches.
+        let (_rx, _sub) = p
+            .new_subscriber("t/metrics", QoS::default(), SubscriberOptions::default())
+            .await
+            .unwrap();
+        assert!(p.topic_metrics().is_empty());
+
+        let pub_ = p.new_publisher("t/metrics", QoS::default()).await.unwrap();
+        pub_.write(b"abc".to_vec()).await.unwrap();
+        pub_.write(b"de".to_vec()).await.unwrap();
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        let m = &metrics[0];
+        assert_eq!(m.topic, "t/metrics");
+        assert_eq!(m.write_count, 2);
+        assert_eq!(m.deliver_count, 2);
+        assert_eq!(m.drop_count, 0);
+        assert_eq!(m.bytes_written, 5);
+        assert_eq!(m.bytes_delivered, 5);
+    }
+
+    /// `MockParticipant::topic_metrics` counts drops under `DropNewest`
+    /// back-pressure once the subscriber queue is full.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn mock_participant_topic_metrics_counts_drops() {
+        use crate::observability::MetricsProvider;
+        use crate::relay::BackPressurePolicy;
+
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let opts = SubscriberOptions {
+            channel_depth: 1,
+            back_pressure: BackPressurePolicy::DropNewest,
+            ..SubscriberOptions::default()
+        };
+        let (_rx, _sub) = p
+            .new_subscriber("t/drop", QoS::default(), opts)
+            .await
+            .unwrap();
+        let pub_ = p.new_publisher("t/drop", QoS::default()).await.unwrap();
+        pub_.write(b"first".to_vec()).await.unwrap();
+        pub_.write(b"second".to_vec()).await.unwrap(); // dropped — queue full
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].write_count, 2);
+        assert_eq!(metrics[0].deliver_count, 1);
+        assert_eq!(metrics[0].drop_count, 1);
+    }
+
+    /// `MockParticipant::topic_metrics` is safe to read concurrently with
+    /// concurrent writes from multiple tokio tasks — no increment is lost
+    /// to a data race.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn mock_participant_topic_metrics_concurrent_writes() {
+        use crate::observability::MetricsProvider;
+
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        // Wide enough channel_depth (default is 64) that no write here is
+        // ever dropped for back-pressure reasons — this test proves no
+        // counter increment is lost to a *data race*, not back-pressure
+        // drop-counting (see the dedicated `..._counts_drops` test above
+        // for that).
+        let opts = SubscriberOptions {
+            channel_depth: 100,
+            ..SubscriberOptions::default()
+        };
+        let (_rx, _sub) = p
+            .new_subscriber("t/concurrent", QoS::default(), opts)
+            .await
+            .unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let p = Arc::clone(&p);
+            handles.push(tokio::spawn(async move {
+                let pub_ = p
+                    .new_publisher("t/concurrent", QoS::default())
+                    .await
+                    .unwrap();
+                for _ in 0..10 {
+                    pub_.write(b"x".to_vec()).await.unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].write_count, 80);
+        assert_eq!(metrics[0].deliver_count, 80);
     }
 
     //fusa:test REQ-CONC-003

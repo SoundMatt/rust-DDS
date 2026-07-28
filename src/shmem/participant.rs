@@ -339,6 +339,21 @@ impl crate::observability::HealthProvider for ShmemParticipant {
     }
 }
 
+/// `ShmemParticipant`'s [`MetricsProvider`](crate::observability::MetricsProvider)
+/// implementation: delegates directly to this participant's shared
+/// `Broker::topic_metrics`, updated by every same-process
+/// [`Broker::publish`] call (the cross-process [`ipc::write_sample`] path
+/// is best-effort delivery outside this process, so it is not separately
+/// counted — same-process delivery is the only path with anything to
+/// count locally, matching go-DDS's `shmem.participant.TopicMetrics`
+/// delegating to its own `shmBroker`).
+//fusa:req REQ-MON-006
+impl crate::observability::MetricsProvider for ShmemParticipant {
+    fn topic_metrics(&self) -> Vec<crate::observability::TopicMetrics> {
+        self.broker.topic_metrics()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -490,6 +505,117 @@ mod tests {
         let h = p.health();
         assert_eq!(h.status, HealthStatus::Down);
         assert_eq!(h.details.as_deref(), Some(r#"{"state":"closed"}"#));
+    }
+
+    /// `ShmemParticipant::topic_metrics` counts writes and same-process
+    /// deliveries per topic, and omits topics with no writes yet.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn shmem_participant_topic_metrics_counts_writes_and_delivers() {
+        use crate::observability::MetricsProvider;
+
+        let p = fast(Domain(120));
+        let (_rx, _sub) = p
+            .new_subscriber(
+                "shmem/metrics",
+                QoS::default(),
+                SubscriberOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert!(p.topic_metrics().is_empty());
+
+        let pub_ = p
+            .new_publisher("shmem/metrics", QoS::default())
+            .await
+            .unwrap();
+        pub_.write(b"abc".to_vec()).await.unwrap();
+        pub_.write(b"de".to_vec()).await.unwrap();
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        let m = &metrics[0];
+        assert_eq!(m.topic, "shmem/metrics");
+        assert_eq!(m.write_count, 2);
+        assert_eq!(m.deliver_count, 2);
+        assert_eq!(m.drop_count, 0);
+        assert_eq!(m.bytes_written, 5);
+        assert_eq!(m.bytes_delivered, 5);
+    }
+
+    /// `ShmemParticipant::topic_metrics` counts drops under `DropNewest`
+    /// back-pressure once the subscriber queue is full.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn shmem_participant_topic_metrics_counts_drops() {
+        use crate::observability::MetricsProvider;
+        use crate::relay::BackPressurePolicy;
+
+        let p = fast(Domain(121));
+        let opts = SubscriberOptions {
+            channel_depth: 1,
+            back_pressure: BackPressurePolicy::DropNewest,
+            ..SubscriberOptions::default()
+        };
+        let (_rx, _sub) = p
+            .new_subscriber("shmem/drop", QoS::default(), opts)
+            .await
+            .unwrap();
+        let pub_ = p.new_publisher("shmem/drop", QoS::default()).await.unwrap();
+        pub_.write(b"first".to_vec()).await.unwrap();
+        pub_.write(b"second".to_vec()).await.unwrap(); // dropped — queue full
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].write_count, 2);
+        assert_eq!(metrics[0].deliver_count, 1);
+        assert_eq!(metrics[0].drop_count, 1);
+    }
+
+    /// `ShmemParticipant::topic_metrics` is safe to read concurrently with
+    /// concurrent writes from multiple tokio tasks — no increment is lost
+    /// to a data race.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn shmem_participant_topic_metrics_concurrent_writes() {
+        use crate::observability::MetricsProvider;
+
+        let p = fast(Domain(122));
+        // Wide enough channel_depth (default is 64) that no write here is
+        // ever dropped for back-pressure reasons — this test proves no
+        // counter increment is lost to a *data race*, not back-pressure
+        // drop-counting (see the dedicated `..._counts_drops` test above
+        // for that).
+        let opts = SubscriberOptions {
+            channel_depth: 100,
+            ..SubscriberOptions::default()
+        };
+        let (_rx, _sub) = p
+            .new_subscriber("shmem/concurrent", QoS::default(), opts)
+            .await
+            .unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let p = Arc::clone(&p);
+            handles.push(tokio::spawn(async move {
+                let pub_ = p
+                    .new_publisher("shmem/concurrent", QoS::default())
+                    .await
+                    .unwrap();
+                for _ in 0..10 {
+                    pub_.write(b"x".to_vec()).await.unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].write_count, 80);
+        assert_eq!(metrics[0].deliver_count, 80);
     }
 
     //fusa:test REQ-SHMEM-005

@@ -681,6 +681,23 @@ impl crate::observability::HealthProvider for RtpsUdpParticipant {
     }
 }
 
+/// `RtpsUdpParticipant`'s
+/// [`MetricsProvider`](crate::observability::MetricsProvider)
+/// implementation: delegates directly to
+/// [`super::participant::RtpsParticipant::topic_metrics`]. Unlike
+/// `HealthProvider` above, this needed no scope-narrowing versus go-DDS —
+/// `super::participant::RtpsParticipant`'s per-topic counters live behind a
+/// plain `std::sync::Mutex`, not the `tokio::sync::RwLock` guarding
+/// `writers`/`readers`, specifically so this synchronous trait method could
+/// read them directly; see `RtpsParticipant::topic_metrics`'s own docs for
+/// why.
+//fusa:req REQ-MON-006
+impl crate::observability::MetricsProvider for RtpsUdpParticipant {
+    fn topic_metrics(&self) -> Vec<crate::observability::TopicMetrics> {
+        self.inner.topic_metrics()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RtpsPublisher
 // ---------------------------------------------------------------------------
@@ -967,6 +984,51 @@ mod tests {
         let h = p.health();
         assert_eq!(h.status, HealthStatus::Down);
         assert_eq!(h.details.as_deref(), Some(r#"{"state":"closed"}"#));
+    }
+
+    /// `RtpsUdpParticipant::topic_metrics` counts writes and local
+    /// deliveries per topic, wired through to
+    /// `RtpsParticipant::topic_metrics` — matching go-DDS's
+    /// `rtps.participant.TopicMetrics` byte-for-byte counting semantics.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn rtps_participant_topic_metrics_counts_writes_and_delivers() {
+        use crate::observability::MetricsProvider;
+
+        let Ok(p) = RtpsUdpParticipant::new(TEST_DOMAIN).await else {
+            return;
+        };
+        assert!(p.topic_metrics().is_empty());
+
+        let pub_ = p
+            .new_publisher("MetricsTopic", DEFAULT_QOS.clone())
+            .await
+            .unwrap();
+        let (rx, _sub) = p
+            .new_subscriber(
+                "MetricsTopic",
+                DEFAULT_QOS.clone(),
+                SubscriberOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        pub_.write(b"abc".to_vec()).await.unwrap();
+        let sample = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for the local delivery")
+            .expect("channel closed with no sample");
+        assert_eq!(sample.payload, b"abc");
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        let m = &metrics[0];
+        assert_eq!(m.topic, "MetricsTopic");
+        assert_eq!(m.write_count, 1);
+        assert_eq!(m.deliver_count, 1);
+        assert_eq!(m.drop_count, 0);
+        assert_eq!(m.bytes_written, 3);
+        assert_eq!(m.bytes_delivered, 3);
     }
 
     //fusa:test REQ-PART-003

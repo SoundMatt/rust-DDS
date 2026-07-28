@@ -20,17 +20,50 @@
 //! shmem to match that, it is a small, separable follow-up.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::participant::SubInner;
 use crate::relay::SubscriberOptions;
 use crate::types::{Domain, DurabilityKind, QoS, Sample};
 
-/// Per-topic broker state: this process's subscribers plus, for
-/// TransientLocal topics, the last published sample.
+/// Per-topic write/deliver/drop/byte counters — `observability::MetricsProvider`
+/// (`ROADMAP.md`'s "Planned — v0.6 — Observability (Tier 5)" milestone).
+/// Direct structural port of go-DDS's `shmBroker.shmTopicCounter`
+/// (`shmem/shmem.go`). Plain `AtomicU64`s inside the already-`Mutex`-guarded
+/// `topics` map below — see `observability::metrics`'s module docs for why
+/// that (never a `tokio::sync::RwLock`) is what lets
+/// `MetricsProvider::topic_metrics`'s synchronous trait method read this
+/// state directly.
+#[derive(Default)]
+struct TopicCounters {
+    writes: AtomicU64,
+    delivers: AtomicU64,
+    drops: AtomicU64,
+    bytes_written: AtomicU64,
+    bytes_delivered: AtomicU64,
+}
+
+impl TopicCounters {
+    fn snapshot(&self, topic: &str) -> crate::observability::TopicMetrics {
+        crate::observability::TopicMetrics {
+            topic: topic.to_string(),
+            write_count: self.writes.load(Ordering::Relaxed),
+            deliver_count: self.delivers.load(Ordering::Relaxed),
+            drop_count: self.drops.load(Ordering::Relaxed),
+            bytes_written: self.bytes_written.load(Ordering::Relaxed),
+            bytes_delivered: self.bytes_delivered.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Per-topic broker state: this process's subscribers, for TransientLocal
+/// topics the last published sample, and this topic's
+/// [`TopicCounters`].
 struct TopicState {
     subscribers: Vec<Arc<SubInner>>,
     last_sample: Option<Sample>,
+    metrics: TopicCounters,
 }
 
 impl TopicState {
@@ -38,6 +71,7 @@ impl TopicState {
         Self {
             subscribers: Vec::new(),
             last_sample: None,
+            metrics: TopicCounters::default(),
         }
     }
 }
@@ -66,11 +100,20 @@ impl Broker {
     //fusa:req REQ-SHMEM-002
     //fusa:req REQ-SHMEM-004
     //fusa:req REQ-SHMEM-007
+    //fusa:req REQ-MON-006
     pub(super) fn publish(&self, topic: &str, sample: Sample, qos: &QoS) {
         let mut topics = self.topics.lock().unwrap();
         let state = topics
             .entry(topic.to_string())
             .or_insert_with(TopicState::new);
+
+        let payload_len = sample.payload.len() as u64;
+        state.metrics.writes.fetch_add(1, Ordering::Relaxed);
+        state
+            .metrics
+            .bytes_written
+            .fetch_add(payload_len, Ordering::Relaxed);
+
         if qos.durability == DurabilityKind::TransientLocal {
             state.last_sample = Some(sample.clone());
         }
@@ -78,8 +121,33 @@ impl Broker {
             .subscribers
             .retain(|s| !s.closed.load(std::sync::atomic::Ordering::SeqCst));
         for sub in &state.subscribers {
-            sub.push(sample.clone());
+            if sub.push(sample.clone()) {
+                state.metrics.delivers.fetch_add(1, Ordering::Relaxed);
+                state
+                    .metrics
+                    .bytes_delivered
+                    .fetch_add(payload_len, Ordering::Relaxed);
+            } else {
+                state.metrics.drops.fetch_add(1, Ordering::Relaxed);
+            }
         }
+    }
+
+    /// Snapshot of per-topic write/deliver/drop/byte counters, one entry
+    /// per topic this broker has observed at least one publish for —
+    /// `observability::MetricsProvider`'s backing data for
+    /// `ShmemParticipant`. A topic with only a `subscribe` call and no
+    /// `publish` yet is omitted, matching go-DDS's own `topicCounter`,
+    /// which `subscribe` never reaches.
+    //fusa:req REQ-MON-006
+    pub(super) fn topic_metrics(&self) -> Vec<crate::observability::TopicMetrics> {
+        self.topics
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, state)| state.metrics.writes.load(Ordering::Relaxed) > 0)
+            .map(|(topic, state)| state.metrics.snapshot(topic))
+            .collect()
     }
 
     /// Register a new process-local subscriber for `topic`, delivering the
