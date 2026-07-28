@@ -1,0 +1,70 @@
+# Interop test environment: rust-DDS (host) <-> CycloneDDS (container).
+#
+# ROADMAP.md "Interop testing" section, deliverable 3 of 3 — a third,
+# independent DDS oracle beyond go-DDS self-interop. Mirrors go-DDS's own
+# `interop/docker-compose.yml` (same image reference, same
+# reliable-QoS/`ddsperf` invocation shape) so both repos exercise the same
+# reference CycloneDDS setup.
+#
+# Usage:
+#   docker compose up -d cyclone-peer
+#   cargo test --release --features cyclone-interop --test cyclone_interop -- --ignored --test-threads=1
+#   docker compose down
+#
+# See tests/cyclone_interop.rs's module doc comment for the per-test
+# service (cyclone-sub / cyclone-pub / cyclone-peer) each test expects, and
+# for the CYCLONE_INTEROP_DOMAIN / CYCLONE_INTEROP_TIMEOUT_SECS environment
+# variables.
+#
+# Note (carried forward from go-DDS's own compose file, same caveat
+# applies here): `eclipse-cyclonedds/cyclonedds` is not currently published
+# to a public registry under this exact name. Until a reference image is
+# published, build one locally from the upstream CycloneDDS source
+# (https://github.com/eclipse-cyclonedds/cyclonedds) with `ddsperf` on
+# PATH and re-tag it to this name, e.g.:
+#
+#   docker build -t eclipse-cyclonedds/cyclonedds:latest \
+#     https://github.com/eclipse-cyclonedds/cyclonedds.git
+#
+# This is exactly why the `cyclone-interop` CI job (.github/workflows/ci.yml)
+# probes image availability first and skips cleanly (green, not red) rather
+# than failing when no such image can be pulled — the harness must not
+# block ordinary development on a native, environment-dependent dependency
+# that ROADMAP.md's own Tier 1 scoping explicitly called out as "genuinely
+# out of scope" for routine CI.
+
+services:
+  # CycloneDDS peer — subscribes the ping topic rust-DDS publishes to, and
+  # independently publishes the pong topic rust-DDS subscribes to. Used by
+  # tests/cyclone_interop.rs's bidirectional_reliable_interop_with_live_cyclone_peer.
+  cyclone-peer:
+    image: eclipse-cyclonedds/cyclonedds:latest
+    network_mode: host # shares the host network stack for multicast (SPDP/SEDP)
+    environment:
+      - DDS_DOMAIN=0
+    command: >
+      sh -c "
+        ddsperf -D 0 sub T:interop/rust-dds-ping Qos:r:1k:e:1 &
+        ddsperf -D 0 pub T:interop/rust-dds-pong Qos:r:1k:e:1 z:8 n:10 &
+        wait
+      "
+    restart: unless-stopped
+
+  # Minimal CycloneDDS subscriber for rust_publisher_discovered_by_cyclone_subscriber.
+  cyclone-sub:
+    image: eclipse-cyclonedds/cyclonedds:latest
+    network_mode: host
+    environment:
+      - DDS_DOMAIN=0
+    command: ddsperf -D 0 sub T:interop/rust-dds-ping Qos:r:1k:e:1 -n 5
+    profiles: [sub]
+
+  # Minimal CycloneDDS publisher for
+  # rust_subscriber_receives_reliable_samples_from_cyclone_publisher.
+  cyclone-pub:
+    image: eclipse-cyclonedds/cyclonedds:latest
+    network_mode: host
+    environment:
+      - DDS_DOMAIN=0
+    command: ddsperf -D 0 pub T:interop/rust-dds-pong Qos:r:1k:e:1 z:16 n:10
+    profiles: [pub]
