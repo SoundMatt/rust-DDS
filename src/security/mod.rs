@@ -34,20 +34,29 @@
 //!   plugin" — the first plugin in this module tree to provide
 //!   confidentiality (the payload itself is encrypted, not just
 //!   authenticated).
+//! - [`acl`] — [`acl::AccessPolicy`], a topic-level read/write access
+//!   control list. Direct port of go-DDS's `security.AccessPolicy`
+//!   (`security/access.go`). The v0.5 milestone's fourth checklist item,
+//!   "Topic ACL (`AccessPolicy`)". Unlike the three plugins above,
+//!   `AccessPolicy` does not implement `SecurityPlugin` — it is an
+//!   orthogonal authorization mechanism (which participants/writers/
+//!   readers may publish/subscribe to which topics), not a payload-seal/
+//!   -open transform.
 //!
 //! Not yet landed (later v0.5 checklist items, each its own future
-//! module mirroring go-DDS's corresponding file): a topic ACL
-//! (`AccessPolicy`, go-DDS's `security/access.go`), an anti-replay guard
+//! module mirroring go-DDS's corresponding file): an anti-replay guard
 //! (`ReplayGuard`, go-DDS's `security/replay.go`), and HMAC-SHA-256
 //! discovery authentication (go-DDS's `security/discovery.go` — per the
 //! parity build-out plan's Tier 2 section, this last one plugs into SPDP
 //! and is therefore not fully decoupled from `crate::rtps`, unlike
 //! everything else in this module tree, which is transport-agnostic).
 
+pub mod acl;
 pub mod aes_gcm;
 pub mod hmac;
 pub mod plugin;
 
+pub use acl::{AccessPolicy, Permission, Rule};
 pub use aes_gcm::AesGcmPlugin;
 pub use hmac::HmacPlugin;
 pub use plugin::{NullPlugin, SecurityError, SecurityPlugin};
