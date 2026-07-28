@@ -118,7 +118,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, RwLock};
@@ -202,6 +202,41 @@ struct WriterState {
     acked: AtomicU64,
 }
 
+/// Per-topic write/deliver/drop/byte counters — `observability::MetricsProvider`
+/// (`ROADMAP.md`'s "Planned — v0.6 — Observability (Tier 5)" milestone).
+/// Deliberately a plain `std::sync::Mutex`-guarded map of `AtomicU64`
+/// counters, *not* folded into [`RtpsParticipant`]'s existing
+/// `tokio::sync::RwLock`-guarded `readers`/`writers` maps: this state must
+/// be readable from `MetricsProvider::topic_metrics(&self)`, a synchronous
+/// (non-`async`) trait method that cannot `.await` a `tokio::sync::RwLock`
+/// — the exact tension [`super::dds_participant::RtpsUdpParticipant`]'s
+/// `HealthProvider` impl documented and deferred for its own
+/// writer/reader-count reporting. A `std::sync::Mutex` is locked
+/// synchronously (no `.await` required) and held only briefly here (never
+/// across an `.await`), so it sidesteps that tension entirely rather than
+/// deferring it further — see `observability::metrics`'s own module docs.
+#[derive(Default)]
+struct TopicCounters {
+    writes: AtomicU64,
+    delivers: AtomicU64,
+    drops: AtomicU64,
+    bytes_written: AtomicU64,
+    bytes_delivered: AtomicU64,
+}
+
+impl TopicCounters {
+    fn snapshot(&self, topic: &str) -> crate::observability::TopicMetrics {
+        crate::observability::TopicMetrics {
+            topic: topic.to_string(),
+            write_count: self.writes.load(Ordering::Relaxed),
+            deliver_count: self.delivers.load(Ordering::Relaxed),
+            drop_count: self.drops.load(Ordering::Relaxed),
+            bytes_written: self.bytes_written.load(Ordering::Relaxed),
+            bytes_delivered: self.bytes_delivered.load(Ordering::Relaxed),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RtpsParticipant
 // ---------------------------------------------------------------------------
@@ -251,6 +286,11 @@ pub struct RtpsParticipant {
     /// method's docs for why this is a setter rather than a constructor
     /// parameter.
     user_data_multicast_addr: RwLock<Option<SocketAddr>>,
+    /// Per-topic [`TopicCounters`], keyed by topic name —
+    /// `observability::MetricsProvider`'s backing data. See
+    /// [`TopicCounters`]'s own docs for why this is a `std::sync::Mutex`,
+    /// not a `tokio::sync::RwLock` like `readers`/`writers` above.
+    topic_metrics: Mutex<HashMap<String, Arc<TopicCounters>>>,
 }
 
 impl RtpsParticipant {
@@ -311,6 +351,7 @@ impl RtpsParticipant {
             last_sample: RwLock::new(HashMap::new()),
             persist_dir,
             user_data_multicast_addr: RwLock::new(None),
+            topic_metrics: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1061,6 +1102,7 @@ impl RtpsParticipant {
             if !Self::accepts_source(state, self.guid_prefix, source).await {
                 continue;
             }
+            let byte_len = payload.len() as u64;
             let sample = Sample {
                 topic: state.topic.clone(),
                 payload: payload.clone(),
@@ -1068,10 +1110,22 @@ impl RtpsParticipant {
                 sequence_number: seq_num,
                 writer_guid,
             };
+            // Per-topic counters (observability::MetricsProvider):
+            // deliberately scoped to this exact push, not before it — a
+            // topic with only a registered reader and no delivered sample
+            // yet must not appear in `topic_metrics()` (see that method's
+            // docs), so this lookup/create happens only on the path that
+            // is about to record a delivery or a drop, never speculatively.
+            let counters = self.topic_counter(&state.topic);
             if state.inner.push(sample) {
                 self.delivers.fetch_add(1, Ordering::Relaxed);
+                counters.delivers.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .bytes_delivered
+                    .fetch_add(byte_len, Ordering::Relaxed);
             } else {
                 self.drops.fetch_add(1, Ordering::Relaxed);
+                counters.drops.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -1107,6 +1161,43 @@ impl RtpsParticipant {
     /// under `DropNewest`/unsubscribed/closed — matches go-DDS's `mDrops`.
     pub fn drops(&self) -> u64 {
         self.drops.load(Ordering::Relaxed)
+    }
+
+    /// Returns (creating on first access) the [`TopicCounters`] for
+    /// `topic`. Synchronous — a brief `std::sync::Mutex` lock, never held
+    /// across an `.await` — see [`TopicCounters`]'s own docs for why that
+    /// matters.
+    fn topic_counter(&self, topic: &str) -> Arc<TopicCounters> {
+        let mut map = self.topic_metrics.lock().unwrap();
+        Arc::clone(
+            map.entry(topic.to_string())
+                .or_insert_with(|| Arc::new(TopicCounters::default())),
+        )
+    }
+
+    /// Snapshot of per-topic write/deliver/drop/byte counters, one entry
+    /// per topic this participant has locally written to *or* dispatched a
+    /// remotely-received sample for — `observability::MetricsProvider`'s
+    /// backing data for [`super::dds_participant::RtpsUdpParticipant`]. A
+    /// topic with only a registered reader and neither a local write nor
+    /// any received remote traffic yet is omitted, matching go-DDS's own
+    /// `topicCounterFor`, reached only from `Write`/`dispatchToReaders`,
+    /// never reader registration — no post-hoc filtering needed here since
+    /// `RtpsParticipant::topic_counter` is itself only ever called from
+    /// those same two call sites (unlike `mock`/`shmem`'s broker wirings,
+    /// which fold per-topic counters into the same map subscriber
+    /// registration also populates, and so filter on `write_count > 0`
+    /// instead — this participant's per-topic map has no such shared-map
+    /// concern, since `dispatch_to_readers` is reached independently of any
+    /// local write via the UDP receive path, and must still be counted).
+    //fusa:req REQ-MON-006
+    pub fn topic_metrics(&self) -> Vec<crate::observability::TopicMetrics> {
+        self.topic_metrics
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(topic, counters)| counters.snapshot(topic))
+            .collect()
     }
 }
 
@@ -1219,6 +1310,18 @@ impl RtpsWriter {
             return Ok(());
         };
         let seq = writer_state.seq.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Per-topic write counters (observability::MetricsProvider): matches
+        // go-DDS's `rtpsWriter.Write` incrementing `topicTC.writes`/
+        // `topicTC.bytesW` up front, before any encoding work — see
+        // `RtpsParticipant::topic_metrics`'s docs for why this participant's
+        // per-topic map needs no additional filtering at read time.
+        //fusa:req REQ-MON-006
+        let topic_counter = self.participant.topic_counter(&self.topic);
+        topic_counter.writes.fetch_add(1, Ordering::Relaxed);
+        topic_counter
+            .bytes_written
+            .fetch_add(payload.len() as u64, Ordering::Relaxed);
 
         let wrapped = wrap_payload(payload);
 
@@ -1545,6 +1648,97 @@ mod tests {
         let sample = rx.try_recv().unwrap();
         assert_eq!(sample.payload, b"first");
         assert!(rx.try_recv().is_none());
+    }
+
+    /// `RtpsParticipant::topic_metrics` counts local writes and successful
+    /// local deliveries per topic, and omits topics with neither a write
+    /// nor a dispatched sample yet.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn topic_metrics_counts_writes_and_delivers() {
+        let p = lone_participant(ascending_prefix()).await;
+        let (_rx, _reader) = p.new_reader("Square", SubscriberOptions::default()).await;
+        // A reader with no writer yet must not create a topic_metrics entry.
+        assert!(p.topic_metrics().is_empty());
+
+        let writer = p.new_writer("Square").await;
+        writer.write(b"abc").await.unwrap();
+        writer.write(b"de").await.unwrap();
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        let m = &metrics[0];
+        assert_eq!(m.topic, "Square");
+        assert_eq!(m.write_count, 2);
+        assert_eq!(m.deliver_count, 2);
+        assert_eq!(m.drop_count, 0);
+        assert_eq!(m.bytes_written, 5);
+        assert_eq!(m.bytes_delivered, 5);
+    }
+
+    /// `RtpsParticipant::topic_metrics` counts drops under `DropNewest`
+    /// back-pressure once the local reader's queue is full.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn topic_metrics_counts_drops() {
+        let p = lone_participant(ascending_prefix()).await;
+        let opts = SubscriberOptions {
+            channel_depth: 1,
+            back_pressure: BackPressurePolicy::DropNewest,
+            topic: None,
+            deadline_missed: None,
+        };
+        let (_rx, _reader) = p.new_reader("Square", opts).await;
+        let writer = p.new_writer("Square").await;
+
+        writer.write(b"first").await.unwrap();
+        writer.write(b"second").await.unwrap(); // dropped: queue already full
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].write_count, 2);
+        assert_eq!(metrics[0].deliver_count, 1);
+        assert_eq!(metrics[0].drop_count, 1);
+    }
+
+    /// `RtpsParticipant::topic_metrics` is safe to read concurrently with
+    /// concurrent writes from multiple tokio tasks — no increment is lost
+    /// to a data race.
+    //fusa:test REQ-MON-006
+    #[tokio::test]
+    async fn topic_metrics_concurrent_writes() {
+        let p = lone_participant(ascending_prefix()).await;
+        // Wide enough channel_depth (default is 64) that no write here is
+        // ever dropped for back-pressure reasons — this test proves no
+        // counter increment is lost to a *data race*, not back-pressure
+        // drop-counting (see the dedicated `topic_metrics_counts_drops`
+        // test above for that).
+        let opts = SubscriberOptions {
+            channel_depth: 100,
+            back_pressure: BackPressurePolicy::DropNewest,
+            topic: None,
+            deadline_missed: None,
+        };
+        let (_rx, _reader) = p.new_reader("Square", opts).await;
+        let writer = Arc::new(p.new_writer("Square").await);
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let writer = Arc::clone(&writer);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..10 {
+                    writer.write(b"x").await.unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let metrics = p.topic_metrics();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].write_count, 80);
+        assert_eq!(metrics[0].deliver_count, 80);
     }
 
     //fusa:test REQ-RTPS-038

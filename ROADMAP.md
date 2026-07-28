@@ -1299,7 +1299,74 @@ harder to change.
   `Ok`/no-details before `close()` and `Down`/`{"state":"closed"}` after,
   for `MockParticipant`, `ShmemParticipant`, and `RtpsUdpParticipant`
   each.
-- [ ] `MetricsProvider` trait (per-topic write/deliver/drop counters)
+- [x] `MetricsProvider` trait (per-topic write/deliver/drop counters) —
+  landed as `src/observability/metrics.rs`, this milestone's second Tier 5
+  module. Naming discrepancy worth being explicit about: go-DDS's `dds.go`
+  actually declares *three* related, separately optional root-package
+  interfaces — `MetricsProvider` (aggregate, participant-wide `Metrics`,
+  not broken out by topic), `DiscoveryMetricsProvider` (SPDP/SEDP
+  announce/peer/match counters), and `TopicMetricsProvider` (the same
+  write/deliver/drop/byte shape as the aggregate `Metrics`, but one entry
+  per observed topic). This checklist item's own wording —
+  `"MetricsProvider` trait (per-topic write/deliver/drop counters)"` —
+  matches go-DDS's `TopicMetrics` shape field for field (per-topic,
+  `WriteCount`/`DeliverCount`/`DropCount`), not go-DDS's aggregate,
+  non-per-topic `Metrics`/`MetricsProvider`; this port therefore ports
+  go-DDS's `TopicMetricsProvider`/`TopicMetrics` under the Rust trait name
+  `MetricsProvider`, matching this checklist item's own chosen name rather
+  than go-DDS's. go-DDS's aggregate, participant-wide
+  `Metrics`/`MetricsProvider` and its `DiscoveryMetrics`/
+  `DiscoveryMetricsProvider` are out of scope for this item — a future
+  item may port either as a separate, additional trait without naming
+  conflict in Rust (the collision is purely with go-DDS's own naming
+  choices, not a Rust constraint).
+  `TopicMetrics` is a direct field-for-field port of go-DDS's
+  `dds.TopicMetrics` (`topic`/`write_count`/`deliver_count`/`drop_count`/
+  `bytes_written`/`bytes_delivered`, `snake_case` per this crate's own
+  convention — go-DDS's own struct carries no `json:"..."` tags, unlike
+  its sibling `Health`, so this port deliberately does not reproduce that
+  inconsistency); `MetricsProvider` itself is `topic_metrics(&self) ->
+  Vec<TopicMetrics>`, object-safe (`Box<dyn MetricsProvider>`/`Arc<dyn
+  MetricsProvider>`) and `Send + Sync`, matching this crate's established
+  `HealthProvider`/`security::SecurityPlugin` shape.
+  Implemented on every concrete, public `Participant` type this crate has
+  today — `mock::MockParticipant`, `shmem::ShmemParticipant`, and
+  `rtps::dds_participant::RtpsUdpParticipant` — each counting
+  writes/delivers/drops/bytes with `AtomicU64` counters behind a
+  `std::sync::Mutex`-guarded per-topic map, deliberately never a
+  `tokio::sync::RwLock`: `HealthProvider`'s own port documented a scope
+  narrowing versus go-DDS's `rtps.participant.Health` (live writer/reader
+  counts left unsurfaced because that state lives behind
+  `tokio::sync::RwLock` and `health(&self)` is synchronous, unable to
+  `.await`); `MetricsProvider::topic_metrics(&self)` is equally
+  synchronous and hits the identical tension, so every wiring in this
+  crate sidesteps it with a plain `std::sync::Mutex` (locked
+  synchronously, no `.await` needed) instead of deferring further.
+  `mock::MockParticipant`/`shmem::ShmemParticipant` fold their per-topic
+  counters into the same map subscriber registration already populates,
+  and filter the reported list on `write_count > 0` at read time (a topic
+  with only a `subscribe` call and no `publish` yet is omitted, matching
+  go-DDS's own `topicCounterFor`, reached only from `publish`/`deliver`,
+  never `subscribe`); `rtps::participant::RtpsParticipant` instead creates
+  its per-topic entries only at the two call sites that ever touch them
+  (`RtpsWriter::write` and `dispatch_to_readers`, the latter reached
+  independently of any local write via the UDP receive path for
+  remotely-originated samples) and needs no such filter, matching go-DDS's
+  `rtpsWriter.Write`/`dispatchToReaders` `topicCounterFor` call sites
+  exactly.
+  Adds REQ-MON-004/005/006 with full `fusa:req`/`fusa:test` traceability.
+  Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001); no `.unwrap()` on any
+  user-visible (non-test) path (REQ-ASIL-003). Unit-tested per this
+  crate's established per-module convention: `TopicMetrics` default/serde
+  round-trip, `Box<dyn MetricsProvider>`/`Arc<dyn MetricsProvider>`
+  object-safety, and a multi-task `tokio::spawn` concurrency test — plus,
+  at each participant's own wiring layer (and, for
+  `RtpsUdpParticipant`, additionally at the underlying
+  `rtps::participant::RtpsParticipant` engine layer), a write/deliver
+  counting test, a `DropNewest` back-pressure drop-counting test, and a
+  multi-task `tokio::spawn` concurrent-write test proving no increment is
+  lost to a data race, for `MockParticipant`, `ShmemParticipant`, and
+  `RtpsUdpParticipant` each.
 - [ ] `Drainer` / close-with-drain
 - [ ] Structured logging via `tracing` crate
 

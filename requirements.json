@@ -1572,6 +1572,27 @@
       "text": "MockParticipant, ShmemParticipant, and RtpsUdpParticipant shall each implement HealthProvider, returning Health{status: Down, details: Some(\"{\\\"state\\\":\\\"closed\\\"}\")} once the participant has been closed and Health{status: Ok, details: None} otherwise, matching go-DDS's mock.participant.Health, shmem.participant.Health, and rtps.participant.Health closed-state shape and details string byte-for-byte.",
       "category": "functional",
       "criticality": "medium"
+    },
+    {
+      "id": "REQ-MON-004",
+      "title": "TopicMetrics value type",
+      "text": "The system shall provide a TopicMetrics struct with topic, write_count, deliver_count, drop_count, bytes_written, and bytes_delivered fields, matching go-DDS's dds.TopicMetrics (dds.go) field for field; write_count shall increment once per successful local write on that topic and deliver_count/drop_count shall each increment once per reader that accepted/rejected the resulting sample, matching go-DDS's per-reader-per-sample counting granularity.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-MON-005",
+      "title": "MetricsProvider trait — object safety and concurrency",
+      "text": "The system shall provide a MetricsProvider trait declaring topic_metrics(&self) -> Vec<TopicMetrics>, matching go-DDS's dds.TopicMetricsProvider interface (TopicMetrics() []TopicMetrics); the trait shall be object-safe (usable as Box<dyn MetricsProvider> and Arc<dyn MetricsProvider>) and Send + Sync, so a single provider instance may be shared across concurrent tokio tasks without the caller adding external synchronization.",
+      "category": "functional",
+      "criticality": "medium"
+    },
+    {
+      "id": "REQ-MON-006",
+      "title": "MetricsProvider wiring on every concrete Participant implementation",
+      "text": "MockParticipant, ShmemParticipant, and RtpsUdpParticipant shall each implement MetricsProvider, returning one TopicMetrics entry per topic with at least one observed write (mock/shmem) or at least one observed local write or dispatched sample (rtps), with write_count/deliver_count/drop_count/bytes_written/bytes_delivered accurately reflecting every write and delivery outcome on that topic since construction; per-topic counters shall be stored behind a std::sync::Mutex-guarded map of atomic counters (never a tokio::sync::RwLock), so that the synchronous, non-async topic_metrics(&self) trait method never requires blocking lock acquisition or async context.",
+      "category": "functional",
+      "criticality": "medium"
     }
   ]
 }
