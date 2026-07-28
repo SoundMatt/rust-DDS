@@ -1234,7 +1234,15 @@ mod tests {
         let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let fired_cb = fired.clone();
         let mut qos = RELIABLE_QOS.clone();
-        qos.deadline_ns = 60_000_000; // 60ms — generous margin for a loaded CI runner.
+        // 500ms — a real RTPS round trip (SEDP bookkeeping, async RwLocks,
+        // actual `write().await` dispatch) has meaningfully more per-write
+        // scheduling overhead than mock::MockParticipant's synchronous
+        // in-process push, and shared macOS/Windows CI runners can stall a
+        // process for tens of milliseconds under matrix-wide parallel test
+        // load. This needs to be large relative to the write cadence below
+        // (not merely larger on average), since a single slow gap between
+        // two writes is enough to trip a tight deadline.
+        qos.deadline_ns = 500_000_000;
         let opts = crate::relay::with_deadline_callback(move || {
             fired_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
@@ -1246,7 +1254,7 @@ mod tests {
 
         // Phase 1: no publisher exists yet — the deadline must fire at
         // least once while the reader sits idle.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
         assert!(
             fired.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "expected the Deadline-missed callback to fire while idle"
@@ -1284,10 +1292,10 @@ mod tests {
         // rather than the timer having stopped for some other reason (e.g.
         // already cancelled).
         let before_phase2 = fired.load(std::sync::atomic::Ordering::SeqCst);
-        for _ in 0..6 {
+        for _ in 0..8 {
             pub_.write(b"tick".to_vec()).await.unwrap();
             let _ = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
         let after_phase2 = fired.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
