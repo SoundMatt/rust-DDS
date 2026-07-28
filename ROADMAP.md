@@ -955,7 +955,49 @@ harder to change.
 
 ### Planned — v0.5 — Security (Tier 2)
 
-- [ ] Pluggable payload security trait (`SecurityPlugin`)
+- [x] Pluggable payload security trait (`SecurityPlugin`) — landed as
+  `src/security/{mod,plugin}.rs`, mirroring this crate's established
+  `src/rtps/`/`src/shmem/` file-per-concern module-tree convention inside
+  the existing single `rust_dds` crate (the `dds-core` Cargo workspace
+  cutover proposed for Tier 2 in the "Interim structure vs. full cutover"
+  section above remains gated on RELAY#59, unratified). Direct port of
+  go-DDS's `security.Plugin` interface (`github.com/SoundMatt/go-DDS`,
+  `security/security.go`): `SecurityPlugin` declares `seal(&self,
+  plaintext: &[u8]) -> Result<Vec<u8>, SecurityError>` and `open(&self,
+  ciphertext: &[u8]) -> Result<Vec<u8>, SecurityError>`, translating
+  go-DDS's `Seal`/`Open` interface methods and its documented "must be
+  inverses" / "must be safe for concurrent use from multiple goroutines"
+  contracts into a `Send + Sync`, object-safe Rust trait (usable as `Box<dyn
+  SecurityPlugin>`/`Arc<dyn SecurityPlugin>`) rather than inventing new API
+  shape. `NullPlugin` (go-DDS's identity-transform `security.NullPlugin`,
+  defined in the same source file as the interface it implements, so
+  ported alongside it here too) is included as the trait's only concrete
+  implementation so far — it also serves as the trait's own correctness
+  fixture (roundtrip/object-safety/concurrency tests). This item is scoped
+  to the trait and its identity implementation only, per this milestone's
+  own checklist ordering: the HMAC-SHA-256 integrity plugin, AES-256-GCM
+  encryption plugin, topic ACL, anti-replay guard, and HMAC-SHA-256
+  discovery authentication below are separate, later items, not
+  implemented here, and `seal`/`open` are not yet wired into
+  `rtps::participant::RtpsParticipant`'s write/receive paths — nothing
+  beyond the identity transform exists yet to make that wiring meaningful
+  to add or to test. `SecurityError` is a new typed error enum local to
+  `security::plugin` (`PayloadTooShort`/`VerificationFailed`/`Other`)
+  rather than added to `crate::error::Error`, mirroring how
+  `rtps::RtpsDecodeError` is its own module-local error type rather than a
+  `crate::error::Error` variant. REQ-SEC-016..019 (a fresh block continuing
+  after this crate's own pre-existing REQ-SEC-001..015, which predate and
+  are unrelated to this feature — see `requirements.json`/`SECURITY.md`
+  for those). Zero `unsafe` (REQ-ASIL-002/REQ-MEM-001); no `.unwrap()` on
+  any user-visible (non-test) path (REQ-ASIL-003). Unit-tested per this
+  crate's established per-module convention: `NullPlugin` seal/open
+  identity and never-fails behavior, the general seal-then-open-is-
+  identity contract exercised against both `NullPlugin` and a second,
+  non-identity test-local plugin, `open` rejecting input not produced by
+  the matching `seal` call, `Box<dyn SecurityPlugin>`/`Arc<dyn
+  SecurityPlugin>` object-safety, and a multi-task `tokio::spawn` test
+  sharing one `Arc<dyn SecurityPlugin>` to exercise the `Send + Sync`
+  bound.
 - [ ] HMAC-SHA-256 integrity plugin
 - [ ] AES-256-GCM encryption plugin
 - [ ] Topic ACL (`AccessPolicy`)
