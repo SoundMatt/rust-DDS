@@ -27,10 +27,16 @@
 //!   second checklist item, "HMAC-SHA-256 integrity plugin". Provides
 //!   integrity and authentication, **not** confidentiality — the
 //!   plaintext travels unencrypted alongside its appended tag.
+//! - [`aes_gcm`] — [`aes_gcm::AesGcmPlugin`], an AES-256-GCM
+//!   confidentiality-and-integrity `SecurityPlugin` implementation. Direct
+//!   port of go-DDS's `security.AESGCMPlugin` (`security/security.go`).
+//!   The v0.5 milestone's third checklist item, "AES-256-GCM encryption
+//!   plugin" — the first plugin in this module tree to provide
+//!   confidentiality (the payload itself is encrypted, not just
+//!   authenticated).
 //!
 //! Not yet landed (later v0.5 checklist items, each its own future
-//! module mirroring go-DDS's corresponding file): an AES-256-GCM
-//! encryption plugin (go-DDS's `AESGCMPlugin`), a topic ACL
+//! module mirroring go-DDS's corresponding file): a topic ACL
 //! (`AccessPolicy`, go-DDS's `security/access.go`), an anti-replay guard
 //! (`ReplayGuard`, go-DDS's `security/replay.go`), and HMAC-SHA-256
 //! discovery authentication (go-DDS's `security/discovery.go` — per the
@@ -38,8 +44,10 @@
 //! and is therefore not fully decoupled from `crate::rtps`, unlike
 //! everything else in this module tree, which is transport-agnostic).
 
+pub mod aes_gcm;
 pub mod hmac;
 pub mod plugin;
 
+pub use aes_gcm::AesGcmPlugin;
 pub use hmac::HmacPlugin;
 pub use plugin::{NullPlugin, SecurityError, SecurityPlugin};

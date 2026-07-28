@@ -1031,7 +1031,53 @@ harder to change.
   same-key interop, arbitrary key length acceptance, `Box<dyn
   SecurityPlugin>`/`Arc<dyn SecurityPlugin>` object-safety, and a
   multi-task `tokio::spawn` concurrency test.
-- [ ] AES-256-GCM encryption plugin
+- [x] AES-256-GCM encryption plugin — landed as `src/security/aes_gcm.rs`'s
+  `AesGcmPlugin`, a third concrete `SecurityPlugin` implementation
+  alongside `NullPlugin` and `HmacPlugin`, and the first to provide
+  confidentiality. Direct port of go-DDS's `security.AESGCMPlugin`
+  (`github.com/SoundMatt/go-DDS`, `security/security.go`): `new` requires
+  an exactly-32-byte key (AES-256), returning `SecurityError::Other` for
+  any other length; `seal` encrypts under a fresh, independently random
+  12-byte nonce every call and returns `nonce || ciphertext || GCM-tag[16]`
+  (wire format identical to go-DDS's, 28 bytes of framing overhead per
+  sample), and `open` splits the nonce back off and decrypts+verifies via
+  AES-GCM's standard authenticated-decryption failure mode, rejecting
+  anything shorter than 28 bytes with `SecurityError::PayloadTooShort` and
+  any authentication failure (tampered nonce, ciphertext, or tag, or a
+  mismatched key) with `SecurityError::VerificationFailed` — never a
+  panic, and never plaintext on failure. Built on the RustCrypto
+  `aes-gcm` crate (pure Rust, no `unsafe`, `default-features = false` with
+  only its `aes`/`alloc` features enabled — nonce generation instead uses
+  this crate's existing `rand` dependency's `OsRng`, matching go-DDS's own
+  `crypto/rand.Reader` and avoiding a second, differently-versioned
+  `rand_core` in the dependency graph). Since go-DDS's own
+  `AESGCMPlugin.Seal` always draws a random nonce (go-DDS's own
+  `security_test.go` verifies it behaviourally, not with fixed reference
+  vectors, for the same reason), byte-exact go-DDS reference vectors here
+  instead pin the underlying AEAD construction itself: a standalone Go
+  program reimplementing `AESGCMPlugin.Seal`'s exact
+  `aes.NewCipher`/`cipher.NewGCM`/`Seal(nonce, nonce, plaintext, nil)`
+  call sequence against a fixed, explicit nonce (substituting for
+  `crypto/rand.Reader`) produces reference ciphertexts that this port's
+  `open` must decrypt byte-exactly, and that this port's own AEAD
+  encryption (given that same fixed nonce) must reproduce byte-exactly.
+  As with the other plugins, `seal`/`open` remain unwired from
+  `rtps::participant::RtpsParticipant`'s write/receive paths — out of
+  scope until a caller wires a concrete plugin in. Adds
+  REQ-SEC-022/REQ-SEC-023 (continuing after REQ-SEC-020/021) with full
+  `fusa:req`/`fusa:test` traceability. Zero `unsafe`
+  (REQ-ASIL-002/REQ-MEM-001); no `.unwrap()` on any user-visible
+  (non-test) path (REQ-ASIL-003) — including OS RNG failure during nonce
+  generation, surfaced as `SecurityError::Other` via `try_fill_bytes`
+  rather than the panicking `fill_bytes`. Unit-tested per this crate's
+  established per-module convention: go-DDS reference-vector byte
+  equality (decrypt- and encrypt-side), seal/open roundtrip, 28-byte
+  framing-overhead assertion, distinct-nonces-per-call assertion,
+  payload-too-short rejection, tampered-nonce/tampered-ciphertext/
+  tampered-tag/truncated-ciphertext/wrong-key verification-failure
+  rejection, bad-key-length rejection at construction, cross-instance
+  same-key interop, `Box<dyn SecurityPlugin>`/`Arc<dyn SecurityPlugin>`
+  object-safety, and a multi-task `tokio::spawn` concurrency test.
 - [ ] Topic ACL (`AccessPolicy`)
 - [ ] Anti-replay guard (`ReplayGuard`)
 - [ ] HMAC-SHA-256 discovery authentication
