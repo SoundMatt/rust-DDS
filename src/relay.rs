@@ -97,6 +97,13 @@ pub struct Message {
     pub protocol: Protocol,
     pub version: Version,
     pub id: String,
+    // §4/relay-message.json requires `payload` to be a base64-encoded JSON
+    // string, matching every canonical protocol type's own `payload` field
+    // (e.g. `dds.Sample.payload`, `types::Sample::payload`) — not a bare
+    // `#[derive]`d JSON array of byte values, which the schema forbids and
+    // which other RELAY implementations (and `relay interop`'s JSON decoder)
+    // cannot parse as a `relay.Message`.
+    #[serde(with = "crate::types::base64_serde")]
     pub payload: Vec<u8>,
     pub timestamp: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
@@ -399,6 +406,23 @@ mod tests {
         assert_eq!(json, "2");
         let p2: Protocol = serde_json::from_str(&json).unwrap();
         assert_eq!(p, p2);
+    }
+
+    //fusa:test REQ-RELAY-001
+    #[test]
+    fn message_payload_serializes_as_base64_string_per_schema() {
+        // relay-message.json's `payload` field is `{"type": "string",
+        // "contentEncoding": "base64"}`, matching every canonical protocol
+        // type's own payload field (e.g. `types::Sample::payload`). A bare
+        // `#[derive]`d `Vec<u8>` would serialize as a JSON array of byte
+        // values instead, which other RELAY implementations (and `relay
+        // interop`'s JSON decoder) cannot parse as a `relay.Message`.
+        let m = Message::new(Protocol::Dds, "rt/chatter", b"hello dds".to_vec());
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["payload"], serde_json::json!("aGVsbG8gZGRz"));
+
+        let back: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(back.payload, b"hello dds");
     }
 
     //fusa:test REQ-RELAY-004

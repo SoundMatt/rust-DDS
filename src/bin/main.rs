@@ -3,12 +3,23 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-//! rust-dds CLI — version, capabilities, and status queries.
+//! rust-dds CLI — version, capabilities, status, and convert.
 //!
-//! Output schemas conform to RELAY spec §12 (cli-version, cli-capabilities, cli-status).
+//! Output schemas conform to RELAY spec §12 (cli-version, cli-capabilities,
+//! cli-status). `convert` implements the §11.2 tooling-conformance driver
+//! (§20.3) so `relay interop` can exercise real DDS<->relay.Message
+//! conversion instead of skipping it.
+
+use std::io::Read;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+
+/// Bounds how much of stdin `convert` will read before parsing, so an
+/// unbounded/adversarial input stream can't exhaust memory. Matches RELAY's
+/// own reference `relay convert` driver's cap, comfortably above spec §16's
+/// largest single-message payload.
+const MAX_CONVERT_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +44,16 @@ enum Command {
     Status {
         #[arg(long, default_value = "text")]
         format: Format,
+    },
+    /// Convert a canonical DDS sample (JSON on stdin) to a relay.Message
+    /// (JSON on stdout) — the §11.2 tooling-conformance driver used by
+    /// `relay interop` (§20.2/§20.3). Only `--protocol DDS` is implemented;
+    /// rust-dds does not adapt any other x-Net protocol.
+    Convert {
+        #[arg(long)]
+        protocol: String,
+        #[arg(long, default_value = "json")]
+        format: String,
     },
 }
 
@@ -125,7 +146,7 @@ fn main() {
                 protocol_int: 2,
                 version: env!("CARGO_PKG_VERSION"),
                 spec_version: rust_dds::RELAY_SPEC_VERSION,
-                commands: vec!["version", "capabilities", "status"],
+                commands: vec!["version", "capabilities", "status", "convert"],
                 transports: vec!["mock"],
                 features: vec![
                     "transient_local",
@@ -164,7 +185,51 @@ fn main() {
                 ),
             }
         }
+        Command::Convert { protocol, format } => run_convert(&protocol, &format),
     }
+}
+
+/// Implements `convert --protocol P --format json`: reads one canonical
+/// `dds.Sample` JSON value from stdin and writes the resulting
+/// `relay.Message` as JSON on stdout. Exit `0` converted, `1` invalid input
+/// (or unsupported protocol), `2` invalid args — matching RELAY's reference
+/// `relay convert` driver (§11.2).
+fn run_convert(protocol: &str, format: &str) {
+    if format != "json" {
+        eprintln!("rust-dds convert: unsupported format {format:?}");
+        std::process::exit(2);
+    }
+    if !protocol.eq_ignore_ascii_case("dds") {
+        eprintln!(
+            "rust-dds convert: protocol {protocol:?} is not implemented by rust-dds (only DDS)"
+        );
+        std::process::exit(1);
+    }
+
+    let mut input = Vec::new();
+    let mut limited = std::io::stdin().take(MAX_CONVERT_INPUT_BYTES + 1);
+    if let Err(e) = limited.read_to_end(&mut input) {
+        eprintln!("rust-dds convert: read stdin: {e}");
+        std::process::exit(1);
+    }
+    if input.len() as u64 > MAX_CONVERT_INPUT_BYTES {
+        eprintln!("rust-dds convert: stdin exceeds {MAX_CONVERT_INPUT_BYTES} byte limit");
+        std::process::exit(2);
+    }
+
+    let sample: rust_dds::types::Sample = match serde_json::from_slice(&input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("rust-dds convert: invalid canonical value: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let msg = rust_dds::adapt::to_message(&sample);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&msg).expect("Message serialization is infallible")
+    );
 }
 
 #[cfg(test)]

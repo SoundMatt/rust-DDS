@@ -126,6 +126,8 @@ rust-dds version
 rust-dds version --format json
 rust-dds capabilities
 rust-dds status
+echo '{"topic":"rt/chatter","payload":"aGVsbG8=","timestamp":"2026-01-01T00:00:00Z","seq":1,"writer_guid":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}' \
+  | rust-dds convert --protocol DDS --format json
 ```
 
 ---

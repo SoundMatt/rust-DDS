@@ -252,7 +252,7 @@ pub const RELIABLE_QOS: QoS = QoS {
 // base64 serde helper
 // ---------------------------------------------------------------------------
 
-mod base64_serde {
+pub(crate) mod base64_serde {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use serde::{Deserialize, Deserializer, Serializer};
 
