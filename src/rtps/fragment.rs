@@ -77,7 +77,7 @@
 //!
 //! No `unsafe` anywhere (REQ-ASIL-002 / REQ-MEM-001, carried forward).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -231,8 +231,20 @@ struct FragKey {
 /// One in-progress reassembly buffer. Matches go-DDS's `fragBuffer`.
 struct FragBuffer {
     data: Vec<u8>,
-    /// Count of fragments received so far.
+    /// Count of *distinct* fragment indices received so far — see
+    /// `received_indices` below. Not incremented again for a duplicate
+    /// delivery of an already-seen index.
     received: u32,
+    /// Set of fragment indices (0-based, `fragment_starting_num - 1`, plus
+    /// offset within a multi-fragment submessage) already contributed to
+    /// `data`. Required because completion is decided by `received >=
+    /// total`: without tracking *which* indices were actually seen,
+    /// redelivery (duplication) of a single index under a lossy/reordering
+    /// transport like UDP could satisfy the count while other indices were
+    /// never delivered, falsely completing reassembly with the
+    /// corresponding regions of `data` left at their zero-fill initial
+    /// value instead of real payload.
+    received_indices: HashSet<u32>,
     /// Total number of fragments expected.
     total: u32,
     /// When the first fragment for this key was received (monotonic clock
@@ -305,6 +317,7 @@ impl FragmentAssembler {
         let fb = buffers.entry(key).or_insert_with(|| FragBuffer {
             data: vec![0u8; f.data_size as usize],
             received: 0,
+            received_indices: HashSet::new(),
             total,
             created: now,
         });
@@ -315,11 +328,22 @@ impl FragmentAssembler {
         // deviation" section.
         let frag_idx = f.fragment_starting_num.wrapping_sub(1);
         for i in 0..f.fragments_in_submsg {
-            let offset = frag_idx
-                .wrapping_add(u32::from(i))
-                .wrapping_mul(u32::from(f.fragment_size));
+            let idx = frag_idx.wrapping_add(u32::from(i));
+            let offset = idx.wrapping_mul(u32::from(f.fragment_size));
             if offset >= f.data_size {
                 break;
+            }
+            // A fragment index already contributed to `data` — redelivery
+            // (duplication) of it must not double-count towards
+            // `received`, or a lossy/reordering transport delivering one
+            // index repeatedly while others are lost could falsely
+            // complete reassembly (see `received_indices`'s doc comment).
+            // Checked (not yet recorded) here; only actually recorded once
+            // this fragment is confirmed well-formed below, so a malformed
+            // delivery never permanently "consumes" an index that a later,
+            // well-formed redelivery could still legitimately complete.
+            if fb.received_indices.contains(&idx) {
+                continue;
             }
             // offset < f.data_size <= MAX_REASSEMBLY_BYTES here, so the
             // remaining arithmetic in this iteration cannot overflow u32.
@@ -335,6 +359,7 @@ impl FragmentAssembler {
             let end = (offset + (frag_end - frag_start)).min(f.data_size);
             fb.data[offset as usize..end as usize]
                 .copy_from_slice(&f.payload[frag_start as usize..frag_end as usize]);
+            fb.received_indices.insert(idx);
             fb.received += 1;
         }
 
@@ -602,6 +627,31 @@ mod tests {
             result = fa.receive(&frags[idx]);
         }
         assert_eq!(result, Some(small));
+    }
+
+    //fusa:test REQ-RTPS-053
+    #[test]
+    fn fragment_assembler_duplicate_fragment_does_not_falsely_complete() {
+        let writer_eid = entity_id_for_writer(1);
+        let payload: Vec<u8> = (0..30u8).collect();
+        let frags =
+            split_into_fragments_n(writer_eid, SequenceNumber { high: 0, low: 4 }, &payload, 10);
+        assert_eq!(frags.len(), 3);
+
+        let fa = FragmentAssembler::new();
+        // Redeliver fragment index 0 three times; fragments 1 and 2 never
+        // arrive. Before the fix, `received` was a plain per-submessage
+        // counter, so this alone would satisfy `received >= total` and
+        // falsely report reassembly complete with bytes [10..30] left at
+        // their zero-fill initial value instead of real payload.
+        assert_eq!(fa.receive(&frags[0]), None);
+        assert_eq!(fa.receive(&frags[0]), None);
+        assert_eq!(fa.receive(&frags[0]), None);
+
+        // Delivering the two genuinely-missing fragments now completes it,
+        // with the correct payload.
+        assert_eq!(fa.receive(&frags[1]), None);
+        assert_eq!(fa.receive(&frags[2]), Some(payload));
     }
 
     //fusa:test REQ-RTPS-053
