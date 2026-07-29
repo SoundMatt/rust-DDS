@@ -330,6 +330,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history (+tags) required by the freshness checks below:
+          # `git merge-base --is-ancestor` needs provenance.json's
+          # vcsRevision commit object to actually be present locally, and
+          # `git describe --tags` needs every tag, not just the default
+          # shallow depth-1 checkout.
+          fetch-depth: 0
       - name: Verify all required safety, security, and evidence documents exist
         run: |
           MISSING=0
@@ -338,7 +345,7 @@ jobs:
             requirements.json \
             .fusa.json .fusa-reqs.json .fusa-hara.json \
             fmea.json fmea.csv tara.json tara.md \
-            sbom.json provenance.json artifact-manifest.json; do
+            sbom.json provenance.json artifact-manifest.json vuln.json; do
             if [ ! -f "$f" ]; then
               echo "ERROR: required artifact missing: $f"
               MISSING=1
@@ -385,6 +392,61 @@ jobs:
           assert len(reqs) >= 100, f'Expected at least 100 requirements, found {len(reqs)}'
           print(f'requirements.json valid: {len(reqs)} requirements')
           "
+      - name: Verify provenance.json is valid JSON
+        run: python3 -c "import json; json.load(open('provenance.json')); print('provenance.json is valid JSON')"
+      - name: Verify artifact-manifest.json is valid JSON
+        run: python3 -c "import json; json.load(open('artifact-manifest.json')); print('artifact-manifest.json is valid JSON')"
+      # Catches exactly the bug reported in #53: vuln.json can claim
+      # `"clean": true` while `"scanned": 0` — a scan that covered zero
+      # packages provides zero evidence of a clean dependency tree.
+      - name: Verify vuln.json is valid JSON and reports a real (non-trivial) scan
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('vuln.json'))
+          scanned = d.get('scanned', 0)
+          assert scanned > 0, f'vuln.json reports scanned={scanned} — a scan covering zero packages cannot support a clean result'
+          print(f'vuln.json valid: scanned {scanned} package(s), {d[\"summary\"][\"vulnerabilities\"]} finding(s)')
+          "
+      # §20.4 evidence freshness (#53): the checked-in provenance/SBOM/vuln/
+      # manifest evidence is a point-in-time snapshot, not regenerated on
+      # every commit, so it can silently drift arbitrarily far behind the
+      # code it's meant to describe with no red CI signal — as happened
+      # here, where the evidence predated 28+ releases' worth of changes.
+      # Bound the drift instead of requiring exact per-commit sync (which
+      # would be defeated by every squash-merge minting a new commit SHA
+      # anyway): the evidence MUST be at least as fresh as the most
+      # recently tagged release, i.e. every release MUST be preceded by
+      # (or include) an evidence regeneration.
+      - name: Verify §20.4 evidence is at least as fresh as the latest tagged release
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0)
+          LATEST_TAG_DATE=$(git log -1 --format=%cI "$LATEST_TAG")
+          echo "Latest tagged release: $LATEST_TAG ($LATEST_TAG_DATE)"
+          for f in provenance.json sbom.json vuln.json artifact-manifest.json; do
+            python3 -c "
+          import datetime, json, sys
+          gen = json.load(open('$f'))['generatedAt']
+          gen_dt = datetime.datetime.fromisoformat(gen.replace('Z', '+00:00'))
+          latest_dt = datetime.datetime.fromisoformat('$LATEST_TAG_DATE')
+          if gen_dt < latest_dt:
+              print(f'ERROR: $f generatedAt ({gen_dt.isoformat()}) predates the latest tagged release $LATEST_TAG ({latest_dt.isoformat()}) — evidence is stale')
+              sys.exit(1)
+          print(f'$f generatedAt {gen_dt.isoformat()} is at least as fresh as $LATEST_TAG ({latest_dt.isoformat()})')
+          "
+          done
+      # provenance.json's vcsRevision must be a real commit reachable from
+      # HEAD, not an unrelated/orphaned/foreign hash (as happened here,
+      # where it referenced a commit predating even this repo's first
+      # tracked evidence commit).
+      - name: Verify provenance.json vcsRevision is a real ancestor of HEAD
+        run: |
+          REV=$(python3 -c "import json; print(json.load(open('provenance.json'))['vcsRevision'])")
+          if ! git merge-base --is-ancestor "$REV" HEAD 2>/dev/null; then
+            echo "ERROR: provenance.json vcsRevision '$REV' is not a real ancestor of HEAD — evidence does not describe this repository's actual history"
+            exit 1
+          fi
+          echo "provenance.json vcsRevision $REV is a real ancestor of HEAD"
 
   dco:
     name: DCO

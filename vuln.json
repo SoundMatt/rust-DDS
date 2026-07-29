@@ -1,15 +1,15 @@
 {
   "findings": [],
-  "generatedAt": "2026-06-19T18:26:06.955166+00:00",
+  "generatedAt": "2026-07-29T15:16:58.382404+00:00",
   "kind": "vuln-report",
   "language": "rust",
-  "scanned": 0,
+  "scanned": 1,
   "scanner": "cargo-audit",
-  "schemaVersion": "1.10",
+  "schemaVersion": "1.15.2",
   "summary": {
     "clean": true,
     "vulnerabilities": 0
   },
   "tool": "rust-FuSa",
-  "toolVersion": "0.2.8"
+  "toolVersion": "0.3.14"
 }
