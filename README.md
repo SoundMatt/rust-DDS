@@ -6,7 +6,7 @@ The `Participant` trait is stable. Implementations are swappable without changin
 
 [![CI](https://github.com/SoundMatt/rust-DDS/actions/workflows/ci.yml/badge.svg)](https://github.com/SoundMatt/rust-DDS/actions/workflows/ci.yml)
 
-**RELAY spec:** see `rust-dds version --format json` (`spec_version`) or [`RELAY_SPEC_VERSION`](src/lib.rs) · **Language:** Rust 2021 · **MSRV:** 1.75
+**RELAY spec:** see `rust-dds version --format json` (`spec_version`) or [`RELAY_SPEC_VERSION`](src/lib.rs) · **Language:** Rust 2021 · **MSRV:** 1.85
 
 ---
 
@@ -159,7 +159,7 @@ sub.close().await.unwrap();    // release resources
 
 | Job | Platforms | Notes |
 |---|---|---|
-| `test` | ubuntu, macos, windows × Rust 1.75/stable | Full test suite |
+| `test` | ubuntu, macos, windows × Rust 1.85/stable | Full test suite |
 | `lint` | ubuntu | clippy -D warnings, rustfmt check |
 | `dco` | PR only | Signed-off-by check |
 
@@ -167,7 +167,7 @@ sub.close().await.unwrap();    // release resources
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for per-milestone goals.
+See [ROADMAP.md](ROADMAP.md) for per-milestone goals and [CHANGELOG.md](CHANGELOG.md) for released version history.
 
 **Released — v0.1**
 
