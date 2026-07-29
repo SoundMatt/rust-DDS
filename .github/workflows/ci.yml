@@ -208,7 +208,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build rsfusa CLI
         run: |
-          git clone --branch v0.3.10 --depth 1 https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
+          git clone --branch v0.3.14 --depth 1 https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
           cd /tmp/rsfusa-src && cargo build --release
           cp /tmp/rsfusa-src/target/release/rsfusa /tmp/rsfusa
       - name: Run safety check gate
@@ -222,7 +222,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build rsfusa CLI
         run: |
-          git clone --branch v0.3.10 --depth 1 https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
+          git clone --branch v0.3.14 --depth 1 https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
           cd /tmp/rsfusa-src && cargo build --release
           cp /tmp/rsfusa-src/target/release/rsfusa /tmp/rsfusa
       - name: Run tool qualification suite
@@ -236,7 +236,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build rsfusa CLI
         run: |
-          git clone --branch v0.3.10 --depth 1 https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
+          git clone --branch v0.3.14 --depth 1 https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
           cd /tmp/rsfusa-src && cargo build --release
           cp /tmp/rsfusa-src/target/release/rsfusa /tmp/rsfusa
       - name: Scan dependencies for vulnerabilities
@@ -250,7 +250,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build rsfusa CLI
         run: |
-          git clone --branch v0.3.10 --depth 1 https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
+          git clone --branch v0.3.14 --depth 1 https://github.com/SoundMatt/rust-FuSa /tmp/rsfusa-src
           cd /tmp/rsfusa-src && cargo build --release
           cp /tmp/rsfusa-src/target/release/rsfusa /tmp/rsfusa
       - name: Run cybersecurity analysis
