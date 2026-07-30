@@ -39,6 +39,15 @@ impl std::fmt::Display for Domain {
     }
 }
 
+/// Maximum valid DDS domain ID.
+///
+/// Per the DDS-RTPS interoperability wire protocol (OMG DDSI-RTPS §9.6.1.1
+/// port-mapping formula), a participant's ports must fit in the 16-bit UDP
+/// port space; with the default `PB`/`DG`/`PG` port parameters this bounds
+/// the usable domain ID at 232 inclusive. Domains outside `0..=MAX_DOMAIN_ID`
+/// cannot be addressed on the wire and are rejected.
+pub const MAX_DOMAIN_ID: i32 = 232;
+
 /// Validate that the domain is within the allowed range [0, 232].
 ///
 /// Returns `Error::DomainOutOfRange` for values outside this range,
@@ -48,7 +57,7 @@ impl std::fmt::Display for Domain {
 //fusa:req REQ-DO-006
 //fusa:req REQ-IEC-002
 pub fn validate_domain(d: Domain) -> Result<(), Error> {
-    if d.0 < 0 || d.0 > 232 {
+    if d.0 < 0 || d.0 > MAX_DOMAIN_ID {
         return Err(Error::DomainOutOfRange);
     }
     Ok(())

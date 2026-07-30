@@ -6,7 +6,7 @@
 //! rust-DDS — DDS (Data Distribution Service) publish/subscribe for Rust.
 //!
 //! Works in any domain: IoT, robotics, industrial control, vehicle networks,
-//! simulation, and more. Conforms to RELAY spec v1.11.
+//! simulation, and more. Conforms to RELAY spec v2.0.
 //!
 //! # Quick start
 //!
@@ -164,7 +164,7 @@ pub use types::{
 //fusa:req REQ-RELAY-005
 //fusa:req REQ-RELAY-006
 //fusa:req REQ-DO-005
-pub const RELAY_SPEC_VERSION: &str = "1.11";
+pub const RELAY_SPEC_VERSION: &str = "2.0";
 
 /// Alias for `RELAY_SPEC_VERSION` for CLI and conformance contexts.
 pub const SPEC_VERSION: &str = RELAY_SPEC_VERSION;

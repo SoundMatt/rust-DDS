@@ -18,8 +18,14 @@ The `Participant` trait is stable. Implementations are swappable without changin
 | `mock` | In-process broker — zero OS dependencies. Default for development and testing. | All |
 | `adapt` | RELAY adapter — `adapt()`, `to_message()`, `from_message()` | All |
 | `relay` | Local RELAY types (Protocol, Message, Node, Context, SubscriberOptions) | All |
+| `rtps` | Real UDP RTPS transport (`RtpsUdpParticipant`) — DDSI-RTPS wire interop | v0.28 |
+| `shmem` | Shared-memory transport (`ShmemParticipant`) | v0.28 |
+| `security` | Security plugins — HMAC discovery auth, AES-256-GCM confidentiality | v0.28 |
+| `observability` | `HealthProvider` / `MetricsProvider` health and metrics | v0.28 |
 
-Additional transports (RTPS, shmem, security, WaitSet) are planned — see [ROADMAP.md](ROADMAP.md).
+The RTPS (UDP), shmem, security, and observability modules are shipped as of
+v0.28 — see [CHANGELOG.md](CHANGELOG.md). WaitSet remains planned — see
+[ROADMAP.md](ROADMAP.md).
 
 ---
 
