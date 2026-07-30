@@ -147,15 +147,19 @@ fn main() {
                 version: env!("CARGO_PKG_VERSION"),
                 spec_version: rust_dds::RELAY_SPEC_VERSION,
                 commands: vec!["version", "capabilities", "status", "convert"],
-                transports: vec!["mock"],
+                transports: vec!["mock", "rtps", "shmem"],
                 features: vec![
                     "transient_local",
                     "back_pressure",
                     "writer_guid",
                     "sequence_number",
+                    "deadline",
+                    "security",
+                    "observability",
+                    "loaning",
                 ],
-                interfaces: vec!["Participant"],
-                optional_interfaces: vec![],
+                interfaces: vec!["Participant", "Publisher", "Subscriber", "LoaningPublisher"],
+                optional_interfaces: vec!["HealthProvider", "MetricsProvider", "SecurityPlugin"],
                 adapt: true,
             };
             println!(

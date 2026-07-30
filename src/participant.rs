@@ -103,8 +103,15 @@ impl SubInner {
             }
             //fusa:req REQ-MEM-003
             crate::relay::BackPressurePolicy::Block => {
-                // TODO REQ-MEM-003: replace with true async backpressure in a future milestone.
-                // For now, Block appends unconditionally (mock-only transport).
+                // REQ-MEM-003: `Block` must bound memory. `push` is a
+                // synchronous call, so the awaited/async form of back-pressure
+                // is provided by the relay `Node` adapter path (see
+                // `adapt.rs`, bounded tokio mpsc). On this direct path we
+                // bound the queue by rejecting the sample once capacity is
+                // reached rather than growing the `VecDeque` without limit.
+                if q.len() >= self.capacity {
+                    return false;
+                }
                 q.push_back(sample);
             }
         }
@@ -391,4 +398,49 @@ pub trait Participant: Send + Sync {
     ///
     /// Idempotent. After close, all writes and subscribes return `Error::Closed`.
     async fn close(&self) -> Result<(), Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::relay::BackPressurePolicy;
+    use crate::types::Sample;
+
+    fn sample(seq: u64) -> Sample {
+        Sample {
+            topic: "t".to_string(),
+            payload: vec![0u8; 8],
+            timestamp: chrono::Utc::now(),
+            sequence_number: seq,
+            writer_guid: [0u8; 16],
+        }
+    }
+
+    // REQ-MEM-003: `Block` back-pressure must bound memory. A fast publisher
+    // pushing past capacity must not grow the queue without limit; pushes are
+    // rejected (return `false`) once capacity is reached.
+    //fusa:test REQ-MEM-003
+    #[test]
+    fn block_policy_bounds_memory() {
+        let cap = 4;
+        let inner = SubInner::new(cap, BackPressurePolicy::Block);
+        for seq in 0..cap as u64 {
+            assert!(
+                inner.push(sample(seq)),
+                "pushes below capacity are accepted"
+            );
+        }
+        // Every further push must be rejected and must not enqueue.
+        for seq in cap as u64..(cap as u64 + 100) {
+            assert!(
+                !inner.push(sample(seq)),
+                "push past capacity must be rejected under Block"
+            );
+        }
+        assert_eq!(
+            inner.queue.lock().unwrap().len(),
+            cap,
+            "Block queue length must stay bounded at capacity"
+        );
+    }
 }
