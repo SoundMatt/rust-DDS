@@ -245,6 +245,9 @@ pub const SUBMSG_ACKNACK: u8 = 0x06;
 /// Submessage ID for INFO_TS (§9.4.5.8).
 //fusa:req REQ-RTPS-010
 pub const SUBMSG_INFO_TS: u8 = 0x09;
+/// Submessage ID for PAD (§9.4.5.9).
+//fusa:req REQ-RTPS-010
+pub const SUBMSG_PAD: u8 = 0x01;
 
 /// Flag bit E: 1 = little-endian (present on every submessage we emit).
 //fusa:req REQ-RTPS-010
@@ -638,8 +641,24 @@ impl<'a> Iterator for SubmessageIter<'a> {
         }
         let id = self.body[0];
         let flags = self.body[1];
-        let length = u16::from_le_bytes([self.body[2], self.body[3]]) as usize;
+        let mut length = u16::from_le_bytes([self.body[2], self.body[3]]) as usize;
         let rest = &self.body[4..];
+        // RTPS 2.3 §9.4.5.1.3: an `octetsToNextHeader` of 0 on any
+        // submessage other than PAD/INFO_TS means the submessage is the last
+        // one in the message and extends to the end of the message. Treat a
+        // zero length as "consume the remainder" so a conformant peer that
+        // emits a final DATA/DATA_FRAG with length 0 is parsed correctly
+        // instead of having its body silently discarded.
+        //
+        // PAD and INFO_TS are excluded: per §9.4.5.8, INFO_TS with the
+        // Invalidate flag set has a genuine 0-byte body and is commonly NOT
+        // the last submessage in the message, so extending it to consume
+        // the remainder would wrongly swallow every submessage after it.
+        // PAD messages are likewise legitimately empty and not necessarily
+        // terminal.
+        if length == 0 && id != SUBMSG_PAD && id != SUBMSG_INFO_TS {
+            length = rest.len();
+        }
         if length > rest.len() {
             self.errored = true;
             return Some(Err(RtpsDecodeError::Truncated {
@@ -1230,5 +1249,75 @@ mod tests {
             }))
         );
         assert_eq!(iter.next(), None);
+    }
+
+    // RTPS 2.3 §9.4.5.1.3: a non-PAD/INFO_TS submessage with
+    // octetsToNextHeader==0 is the last submessage in the Message and its
+    // body extends to the end of the Message, rather than being treated as
+    // an empty (0-byte) body followed by more submessages parsed out of its
+    // own payload bytes.
+    //fusa:test REQ-RTPS-022
+    #[test]
+    fn submessage_iter_extends_zero_length_data_to_end_of_message() {
+        // id=DATA, flags=E, octetsToNextHeader=0, followed by 6 bytes of
+        // payload that must NOT be reinterpreted as further submessages.
+        let mut buf = vec![SUBMSG_DATA, FLAG_ENDIANNESS, 0x00, 0x00];
+        buf.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let parsed: Vec<_> = SubmessageIter::new(&buf)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, SUBMSG_DATA);
+        assert_eq!(parsed[0].body, &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF][..]);
+    }
+
+    // PAD is explicitly excluded from the "extend to end" rule: a 0-length
+    // PAD is a genuine empty submessage and must not swallow the
+    // submessages that follow it.
+    //fusa:test REQ-RTPS-022
+    #[test]
+    fn submessage_iter_does_not_extend_zero_length_pad() {
+        let mut buf = vec![SUBMSG_PAD, FLAG_ENDIANNESS, 0x00, 0x00];
+        // A second, real submessage that must still be parsed as its own
+        // entry rather than being consumed as PAD's "remainder" body.
+        let submsg2 = encode_data_submessage(
+            crate::rtps::guid::ENTITYID_UNKNOWN,
+            crate::rtps::guid::ENTITYID_UNKNOWN,
+            SequenceNumber { high: 0, low: 1 },
+            &[],
+        );
+        buf.extend_from_slice(&submsg2);
+
+        let parsed: Vec<_> = SubmessageIter::new(&buf)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, SUBMSG_PAD);
+        assert!(parsed[0].body.is_empty());
+        assert_eq!(parsed[1].id, SUBMSG_DATA);
+    }
+
+    // INFO_TS is likewise excluded: per §9.4.5.8, INFO_TS with the
+    // Invalidate flag set legitimately has a 0-byte body and is commonly
+    // NOT the last submessage in the Message.
+    //fusa:test REQ-RTPS-022
+    #[test]
+    fn submessage_iter_does_not_extend_zero_length_info_ts() {
+        let mut buf = vec![SUBMSG_INFO_TS, FLAG_ENDIANNESS, 0x00, 0x00];
+        let submsg2 = encode_data_submessage(
+            crate::rtps::guid::ENTITYID_UNKNOWN,
+            crate::rtps::guid::ENTITYID_UNKNOWN,
+            SequenceNumber { high: 0, low: 1 },
+            &[],
+        );
+        buf.extend_from_slice(&submsg2);
+
+        let parsed: Vec<_> = SubmessageIter::new(&buf)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, SUBMSG_INFO_TS);
+        assert!(parsed[0].body.is_empty());
+        assert_eq!(parsed[1].id, SUBMSG_DATA);
     }
 }

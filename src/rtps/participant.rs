@@ -1168,7 +1168,7 @@ impl RtpsParticipant {
     /// across an `.await` — see [`TopicCounters`]'s own docs for why that
     /// matters.
     fn topic_counter(&self, topic: &str) -> Arc<TopicCounters> {
-        let mut map = self.topic_metrics.lock().unwrap();
+        let mut map = self.topic_metrics.lock().unwrap_or_else(|e| e.into_inner());
         Arc::clone(
             map.entry(topic.to_string())
                 .or_insert_with(|| Arc::new(TopicCounters::default())),
@@ -1194,7 +1194,7 @@ impl RtpsParticipant {
     pub fn topic_metrics(&self) -> Vec<crate::observability::TopicMetrics> {
         self.topic_metrics
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(topic, counters)| counters.snapshot(topic))
             .collect()

@@ -121,18 +121,73 @@ impl relay::Node for DdsNode {
             .await
             .map_err(|e| e.as_relay().unwrap_or(relay::Error::NotConnected))?;
 
+        // §10.5 rule 3 / §14 step 3: DropOldest must "drain one message from
+        // the channel, then enqueue the new one" — i.e. evict the *head* of
+        // the queue, not the arriving message. A plain `tokio::sync::mpsc`
+        // channel can't do that from the sender side: only the `Receiver`
+        // half (owned by the caller, not this task) can dequeue, so a
+        // `try_send` on a full channel has no way to reach in and pop the
+        // oldest buffered item.
+        //
+        // To give DropOldest real head-eviction semantics we keep our own
+        // depth-bounded backlog (a plain `VecDeque`) as the actual §14
+        // queue for this policy, and use a 1-slot `tx`/`out_rx` pair purely
+        // as the handoff pipe to the caller. Eviction happens against the
+        // backlog we control, so it is always the oldest *unsent* message
+        // that is dropped — never the newly arriving one — which is
+        // observably different from DropNewest (see
+        // `drop_oldest_evicts_head_not_arriving_message` below).
+        //
+        // DropNewest and Block are untouched: `try_send`/discard-on-Full
+        // already gives DropNewest correct semantics, and a plain blocking
+        // `send` already gives Block correct semantics, directly against
+        // the channel's own buffer.
+        //fusa:req REQ-SEC-012
+        if matches!(policy, relay::BackPressurePolicy::DropOldest) {
+            let (tx, out_rx) = mpsc::channel::<Message>(1);
+            let backlog_depth = depth.max(1);
+            tokio::spawn(async move {
+                let _sub = sub;
+                let mut backlog: std::collections::VecDeque<Message> =
+                    std::collections::VecDeque::with_capacity(backlog_depth);
+                loop {
+                    tokio::select! {
+                        permit = tx.reserve(), if !backlog.is_empty() => {
+                            match permit {
+                                Ok(permit) => {
+                                    if let Some(msg) = backlog.pop_front() {
+                                        permit.send(msg);
+                                    }
+                                }
+                                Err(_) => break, // caller dropped the receiver
+                            }
+                        }
+                        sample = rx.recv() => {
+                            match sample {
+                                Some(sample) => {
+                                    let msg = sample.to_message();
+                                    if backlog.len() >= backlog_depth {
+                                        // §14 step 3: evict the oldest queued
+                                        // message to make room for the new one.
+                                        backlog.pop_front();
+                                    }
+                                    backlog.push_back(msg);
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            });
+            return Ok(out_rx);
+        }
+
         let (tx, out_rx) = mpsc::channel::<Message>(depth.max(1));
 
         // Move `sub` into the task so it stays alive (and the subscription
         // remains registered) for the entire lifetime of the forwarding loop.
         // When the mpsc sender is dropped (receiver closed), the task exits
         // and `sub` is dropped, releasing the subscription.
-        //
-        // §10.5 rule 3: apply the BackPressurePolicy to the relay-level mpsc send.
-        // DropOldest at relay level approximates via try_send — true oldest-drop
-        // requires draining from the receiver side (in the caller's task), which is
-        // not possible with a standard mpsc channel; the DDS subscription already
-        // applies DropOldest to the upstream queue so burst behaviour is correct.
         //fusa:req REQ-SEC-012
         tokio::spawn(async move {
             let _sub = sub;
@@ -146,11 +201,9 @@ impl relay::Node for DdsNode {
                             Err(mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
-                    relay::BackPressurePolicy::DropOldest => match tx.try_send(msg) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {}
-                        Err(mpsc::error::TrySendError::Closed(_)) => break,
-                    },
+                    relay::BackPressurePolicy::DropOldest => {
+                        unreachable!("DropOldest is handled by the dedicated backlog path above")
+                    }
                     relay::BackPressurePolicy::Block => {
                         if tx.send(msg).await.is_err() {
                             break;
@@ -273,6 +326,101 @@ mod tests {
         let node = adapt(p as Arc<dyn Participant>);
         node.close().await.unwrap();
         node.close().await.unwrap();
+    }
+
+    // §10.5 rule 3 / §14 step 3 / REQ-QOS-007 regression: prior to this fix,
+    // the relay-level mpsc forwarding in `subscribe()` applied DropOldest
+    // identically to DropNewest (both simply discarded the arriving sample
+    // via `try_send` on a full channel), so DropOldest never evicted the
+    // head of its own queue at this layer. This reproduces exactly that
+    // scenario — a 1-slot channel with three writes racing ahead of the
+    // reader — and asserts the middle message ("b") is evicted in favor of
+    // the newer one ("c"), not the other way around.
+    //fusa:test REQ-QOS-007
+    //fusa:test REQ-RELAY-003
+    #[tokio::test]
+    async fn drop_oldest_evicts_head_not_arriving_message() {
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let node = adapt(p as Arc<dyn Participant>);
+
+        let opts = SubscriberOptions {
+            channel_depth: 1,
+            back_pressure: relay::BackPressurePolicy::DropOldest,
+            topic: Some("conformance/drop-oldest".into()),
+            ..SubscriberOptions::default()
+        };
+        let mut rx = node.subscribe(opts).await.unwrap();
+
+        for payload in [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] {
+            node.send(
+                Context::background(),
+                Message::new(Protocol::Dds, "conformance/drop-oldest", payload),
+            )
+            .await
+            .unwrap();
+            // Give the background forwarding task a chance to pop the
+            // sample out of the DDS-layer queue and apply the relay-level
+            // DropOldest policy before the next write lands.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.payload, b"a");
+        assert_eq!(second.payload, b"c");
+
+        // "b" was evicted from the backlog, not delivered — no third message.
+        let third = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        assert!(third.is_err(), "expected no third message (b was evicted)");
+    }
+
+    // Companion to `drop_oldest_evicts_head_not_arriving_message`: the exact
+    // same write sequence under DropNewest must produce *different* channel
+    // contents ("a" only — both later arrivals discarded), proving the two
+    // policies are no longer byte-identical at the relay-level channel.
+    //fusa:test REQ-QOS-006
+    #[tokio::test]
+    async fn drop_newest_differs_from_drop_oldest_under_same_load() {
+        let p = MockParticipant::new(Domain(0)).unwrap();
+        let node = adapt(p as Arc<dyn Participant>);
+
+        let opts = SubscriberOptions {
+            channel_depth: 1,
+            back_pressure: relay::BackPressurePolicy::DropNewest,
+            topic: Some("conformance/drop-newest".into()),
+            ..SubscriberOptions::default()
+        };
+        let mut rx = node.subscribe(opts).await.unwrap();
+
+        for payload in [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] {
+            node.send(
+                Context::background(),
+                Message::new(Protocol::Dds, "conformance/drop-newest", payload),
+            )
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.payload, b"a");
+
+        // Under DropNewest both "b" and "c" were discarded on arrival
+        // (unlike DropOldest, which delivers "c").
+        let second = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            second.is_err(),
+            "expected no second message under DropNewest"
+        );
     }
 
     //fusa:test REQ-RELAY-002
