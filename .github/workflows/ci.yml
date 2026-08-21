@@ -182,17 +182,28 @@ jobs:
       # Deliverable 3/3: a third, independent oracle beyond go-DDS
       # self-interop. Same probe-then-skip-cleanly posture as go-DDS's own
       # `test-interop` CI job: this job stays green (not red) when the
-      # CycloneDDS image cannot be pulled, since a native, environment-
-      # dependent image is not something ordinary CI runs should be
+      # CycloneDDS peer image cannot be built, since a native, environment-
+      # dependent build is not something ordinary CI runs should be
       # blocked on — see docker-compose.yml's note.
-      - name: Probe CycloneDDS image availability
+      #
+      # There is no published `eclipse-cyclonedds/cyclonedds` image to
+      # `docker pull` (verified against the upstream org's empty
+      # container-package list and its own scripts/docker/README.md, which
+      # documents that name as a locally-built-only image) — see
+      # Dockerfile.cyclonedds's own doc comment. The probe therefore
+      # actually builds the real peer image from CycloneDDS's own upstream
+      # source instead of pulling a nonexistent tag, so this job's
+      # `available=false` branch now means "the build genuinely failed"
+      # rather than "the tag was never real". Mirrors cpp-DDS's/go-DDS's
+      # own fix for the identical bug (SoundMatt/RELAY THEME-K #125).
+      - name: Probe Docker and build the CycloneDDS peer image
         id: probe
         run: |
-          if docker pull eclipse-cyclonedds/cyclonedds:latest 2>/dev/null; then
+          if docker compose build cyclone-peer; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::CycloneDDS Docker image not available — skipping live-peer interop tests (see docker-compose.yml)"
+            echo "::warning::Building the CycloneDDS peer image failed — skipping live-peer interop tests (see docker-compose.yml)"
           fi
       - name: Start CycloneDDS peer
         if: steps.probe.outputs.available == 'true'
