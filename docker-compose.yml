@@ -16,29 +16,36 @@
 # for the CYCLONE_INTEROP_DOMAIN / CYCLONE_INTEROP_TIMEOUT_SECS environment
 # variables.
 #
-# Note (carried forward from go-DDS's own compose file, same caveat
-# applies here): `eclipse-cyclonedds/cyclonedds` is not currently published
-# to a public registry under this exact name. Until a reference image is
-# published, build one locally from the upstream CycloneDDS source
-# (https://github.com/eclipse-cyclonedds/cyclonedds) with `ddsperf` on
-# PATH and re-tag it to this name, e.g.:
-#
-#   docker build -t eclipse-cyclonedds/cyclonedds:latest \
-#     https://github.com/eclipse-cyclonedds/cyclonedds.git
-#
-# This is exactly why the `cyclone-interop` CI job (.github/workflows/ci.yml)
-# probes image availability first and skips cleanly (green, not red) rather
-# than failing when no such image can be pulled — the harness must not
+# Note: `eclipse-cyclonedds/cyclonedds` is not published to any public
+# registry under this exact name (or any equivalent) — verified against the
+# upstream org's empty container-package list and its own
+# scripts/docker/README.md, which documents that name as locally-built-only.
+# `Dockerfile.cyclonedds` builds a real CycloneDDS peer from upstream source
+# instead of pulling; every service below builds/reuses that same image via
+# the `x-cyclonedds-image` anchor. This is exactly why the `cyclone-interop`
+# CI job (.github/workflows/ci.yml) probes build success first and skips
+# cleanly (green, not red) when the build fails — the harness must not
 # block ordinary development on a native, environment-dependent dependency
 # that ROADMAP.md's own Tier 1 scoping explicitly called out as "genuinely
 # out of scope" for routine CI.
+#
+# `image:`/`build:` on every service below name and build the SAME image.
+# Compose builds it once (tagged `rustdds-interop-cyclonedds:local`) and
+# every service reuses that tag rather than triggering three independent
+# builds. See SoundMatt/RELAY THEME-K (#125) / docs/INTEROP-ARCHITECTURE.md.
+
+x-cyclonedds-image: &cyclonedds-image
+  image: rustdds-interop-cyclonedds:local
+  build:
+    context: .
+    dockerfile: Dockerfile.cyclonedds
 
 services:
   # CycloneDDS peer — subscribes the ping topic rust-DDS publishes to, and
   # independently publishes the pong topic rust-DDS subscribes to. Used by
   # tests/cyclone_interop.rs's bidirectional_reliable_interop_with_live_cyclone_peer.
   cyclone-peer:
-    image: eclipse-cyclonedds/cyclonedds:latest
+    <<: *cyclonedds-image
     network_mode: host # shares the host network stack for multicast (SPDP/SEDP)
     environment:
       - DDS_DOMAIN=0
@@ -52,7 +59,7 @@ services:
 
   # Minimal CycloneDDS subscriber for rust_publisher_discovered_by_cyclone_subscriber.
   cyclone-sub:
-    image: eclipse-cyclonedds/cyclonedds:latest
+    <<: *cyclonedds-image
     network_mode: host
     environment:
       - DDS_DOMAIN=0
@@ -62,7 +69,7 @@ services:
   # Minimal CycloneDDS publisher for
   # rust_subscriber_receives_reliable_samples_from_cyclone_publisher.
   cyclone-pub:
-    image: eclipse-cyclonedds/cyclonedds:latest
+    <<: *cyclonedds-image
     network_mode: host
     environment:
       - DDS_DOMAIN=0
